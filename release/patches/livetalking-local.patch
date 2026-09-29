@@ -1,0 +1,608 @@
+diff --git a/app.py b/app.py
+index 1f9a888..c822fbf 100644
+--- a/app.py
++++ b/app.py
+@@ -54,6 +54,7 @@ from utils.logger import logger
+ import copy
+ import gc
+ from dotenv import load_dotenv
++from pathlib import Path
+ 
+ 
+ app = Flask(__name__)
+@@ -117,6 +118,9 @@ async def download_record(request):
+     else:
+         return web.Response(status=404, text="Record not found")
+ 
++async def healthz(_request):
++    return web.json_response({"status": "ok", "service": "livetalking"})
++
+ 
+ def main():
+     global rtc_manager, opt, model,load_avatar
+@@ -174,6 +178,7 @@ def main():
+     appasync["rtc_manager"] = rtc_manager
+ 
+     appasync.on_shutdown.append(on_shutdown)
++    appasync.router.add_get("/healthz", healthz)
+     appasync.router.add_post("/offer", offer)
+     appasync.router.add_get("/record/{sessionid}", download_record)
+     
+@@ -181,13 +186,26 @@ def main():
+     setup_routes(appasync) 
+ 
+     # Configure default CORS settings.
++    local_web_origins = (
++        "http://127.0.0.1:4173",
++        "http://localhost:4173",
++        "http://127.0.0.1:5173",
++        "http://localhost:5173",
++    )
++    configured_origins = tuple(
++        item.strip().rstrip('/')
++        for item in os.getenv('LIVETALKING_ALLOWED_ORIGINS', '').split(',')
++        if item.strip()
++    )
++    allowed_origins = configured_origins or local_web_origins
+     cors = aiohttp_cors.setup(appasync, defaults={
+-            "*": aiohttp_cors.ResourceOptions(
+-                allow_credentials=True,
+-                expose_headers="*",
+-                allow_headers="*",
+-            )
+-        })
++        origin: aiohttp_cors.ResourceOptions(
++            allow_credentials=False,
++            expose_headers="*",
++            allow_headers="*",
++        )
++        for origin in allowed_origins
++    })
+     # Configure CORS on all routes.
+     for route in list(appasync.router.routes()):
+         cors.add(route)
+@@ -203,7 +221,7 @@ def main():
+         loop = asyncio.new_event_loop()
+         asyncio.set_event_loop(loop)
+         loop.run_until_complete(runner.setup())
+-        site = web.TCPSite(runner, '0.0.0.0', opt.listenport)
++        site = web.TCPSite(runner, '127.0.0.1', opt.listenport)
+         loop.run_until_complete(site.start())
+         if opt.transport=='rtcpush':
+             for k in range(opt.max_session):
+@@ -227,7 +245,8 @@ def main():
+ # os.environ['MULTIPROCESSING_METHOD'] = 'forkserver'                                                    
+ if __name__ == '__main__':
+     mp.set_start_method('spawn')
+-    load_dotenv()  # Load environment variables from .env file, if it exists
++    load_dotenv(Path(__file__).resolve().parents[2] / '.env')
++    load_dotenv()  # Allow a LiveTalking-local override for upstream compatibility.
+     main()
+     
+     
+diff --git a/avatars/wav2lip/genavatar.py b/avatars/wav2lip/genavatar.py
+index e978d2b..115364d 100644
+--- a/avatars/wav2lip/genavatar.py
++++ b/avatars/wav2lip/genavatar.py
+@@ -16,7 +16,7 @@ def osmakedirs(path_list):
+     for path in path_list:
+         os.makedirs(path) if not os.path.exists(path) else None
+ 
+-def video2imgs(vid_path, save_path, ext = '.png',cut_frame = 10000000):
++def video2imgs(vid_path, save_path, ext = '.png',cut_frame = 10000000, watermark=False):
+     cap = cv2.VideoCapture(vid_path)
+     count = 0
+     while True:
+@@ -24,7 +24,8 @@ def video2imgs(vid_path, save_path, ext = '.png',cut_frame = 10000000):
+             break
+         ret, frame = cap.read()
+         if ret:
+-            cv2.putText(frame, "LiveTalking", (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (128,128,128), 1)
++            if watermark:
++                cv2.putText(frame, "LiveTalking", (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (128,128,128), 1)
+             cv2.imwrite(f"{save_path}/{count:08d}.png", frame)
+             count += 1
+         else:
+diff --git a/avatars/wav2lip/inference_silence.py b/avatars/wav2lip/inference_silence.py
+index c4b6ab0..ffe4396 100644
+--- a/avatars/wav2lip/inference_silence.py
++++ b/avatars/wav2lip/inference_silence.py
+@@ -2,6 +2,8 @@ from os import listdir, path
+ import numpy as np
+ import scipy, cv2, os, sys, argparse
+ import json, subprocess, random, string
++sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
++from avatars.wav2lip import audio
+ from tqdm import tqdm
+ from glob import glob
+ import torch, face_detection
+@@ -31,6 +33,8 @@ parser.add_argument('--pads', nargs='+', type=int, default=[0, 10, 0, 0],
+ parser.add_argument('--face_det_batch_size', type=int, 
+ 					help='Batch size for face detection', default=16)
+ parser.add_argument('--wav2lip_batch_size', type=int, help='Batch size for Wav2Lip model(s)', default=16)
++parser.add_argument('--modelres', type=int, choices=[192, 256, 384], default=256,
++				help='Face input resolution; use the prepared avatar face-cache size (256 for this project)')
+ 
+ parser.add_argument('--resize_factor', default=1, type=int, 
+ 			help='Reduce the resolution by this factor. Sometimes, best results are obtained at 480p or 720p')
+@@ -51,7 +55,8 @@ parser.add_argument('--nosmooth', default=False, action='store_true',
+ 					help='Prevent smoothing face detections over a short temporal window')
+ 
+ args = parser.parse_args()
+-args.img_size = 384
++args.img_size = args.modelres
++mel_chunks = None
+ 
+ if os.path.isfile(args.face) and args.face.split('.')[1] in ['jpg', 'png', 'jpeg']:
+ 	args.static = True
+@@ -130,32 +135,40 @@ def datagen(frames):
+ 		face = cv2.resize(face, (args.img_size, args.img_size))
+ 			
+ 		img_batch.append(face)
++		if mel_chunks is not None:
++			mel_batch.append(mel_chunks[i])
+ 		#mel_batch.append(np.zeros((1, 80, 16)))
+ 		frame_batch.append(frame_to_save)
+ 		coords_batch.append(coords)
+ 
+ 		if len(img_batch) >= args.wav2lip_batch_size:
+-			img_batch, mel_batch = np.asarray(img_batch), np.asarray(mel_batch)
++			img_batch = np.asarray(img_batch)
+ 
+ 			img_masked = img_batch.copy()
+ 			img_masked[:, args.img_size//2:] = 0
+ 
+ 			img_batch = np.concatenate((img_masked, img_batch), axis=3) / 255.
+ 			#mel_batch = np.reshape(mel_batch, [len(mel_batch), mel_batch.shape[1], mel_batch.shape[2], 1])
+-			mel_batch = np.zeros((len(img_batch), 80, 16,1))
++			if mel_chunks is None:
++				mel_batch = np.zeros((len(img_batch), 80, 16, 1))
++			else:
++				mel_batch = np.asarray(mel_batch)[..., np.newaxis]
+ 
+ 			yield img_batch, mel_batch, frame_batch, coords_batch
+ 			img_batch, mel_batch, frame_batch, coords_batch = [], [], [], []
+ 
+ 	if len(img_batch) > 0:
+-		img_batch, mel_batch = np.asarray(img_batch), np.asarray(mel_batch)
++		img_batch = np.asarray(img_batch)
+ 
+ 		img_masked = img_batch.copy()
+ 		img_masked[:, args.img_size//2:] = 0
+ 
+ 		img_batch = np.concatenate((img_masked, img_batch), axis=3) / 255.
+ 		#mel_batch = np.reshape(mel_batch, [len(mel_batch), mel_batch.shape[1], mel_batch.shape[2], 1])
+-		mel_batch = np.zeros((len(img_batch), 80, 16,1))
++		if mel_chunks is None:
++			mel_batch = np.zeros((len(img_batch), 80, 16, 1))
++		else:
++			mel_batch = np.asarray(mel_batch)[..., np.newaxis]
+ 
+ 		yield img_batch, mel_batch, frame_batch, coords_batch
+ 
+@@ -198,6 +211,7 @@ def correction(frame_to_save_, pred):
+     return pred
+ 
+ def main():
++	global mel_chunks
+ 	osmakedirs(['./temp'])
+ 	if not os.path.isfile(args.face):
+ 		raise ValueError('--face argument must be a valid path to video/image file')
+@@ -234,6 +248,26 @@ def main():
+ 
+ 	print ("Number of frames available for inference: "+str(len(full_frames)))
+ 
++	if args.audio:
++		wav = audio.load_wav(args.audio, 16000)
++		mel = audio.melspectrogram(wav)
++		if np.isnan(mel.reshape(-1)).sum() > 0:
++			raise ValueError('Mel contains NaN values')
++		mel_chunks = []
++		mel_idx_multiplier = 80.0 / fps
++		i = 0
++		while True:
++			start_idx = int(i * mel_idx_multiplier)
++			if start_idx + mel_step_size > len(mel[0]):
++				mel_chunks.append(mel[:, max(0, len(mel[0]) - mel_step_size):])
++				break
++			mel_chunks.append(mel[:, start_idx:start_idx + mel_step_size])
++			i += 1
++		frame_count = min(len(full_frames), len(mel_chunks))
++		full_frames = full_frames[:frame_count]
++		mel_chunks = mel_chunks[:frame_count]
++		print("Speech mel chunks used: {}".format(frame_count))
++
+ 	# if not args.audio.endswith('.wav'):
+ 	# 	print('Extracting raw audio...')
+ 	# 	command = 'ffmpeg -y -i {} -strict -2 {}'.format(args.audio, 'temp/temp.wav')
+diff --git a/avatars/wav2lip_avatar.py b/avatars/wav2lip_avatar.py
+index e69c72e..18ca4a7 100644
+--- a/avatars/wav2lip_avatar.py
++++ b/avatars/wav2lip_avatar.py
+@@ -69,6 +69,31 @@ def load_model(path):
+     model = model.to(device)
+     return model.eval()
+ 
++def blend_wav2lip_lower_face(base_roi, generated_roi, preserve_upper_face=False):
++    """Blend Wav2Lip only where speech motion is needed.
++
++    Expression-test avatars keep the original upper face pixel-stable so eye
++    blinks are never regenerated into a blurry iris by Wav2Lip. The vertical
++    and side feathering also removes the rectangular paste boundary.
++    """
++    if not preserve_upper_face:
++        return generated_roi
++    height, width = base_roi.shape[:2]
++    vertical = np.linspace(0.0, 1.0, height, dtype=np.float32)
++    vertical = np.clip((vertical - 0.46) / 0.20, 0.0, 1.0)
++    vertical = vertical * vertical * (3.0 - 2.0 * vertical)
++    edge = max(4, min(12, width // 12))
++    horizontal = np.ones(width, dtype=np.float32)
++    horizontal[:edge] = np.linspace(0.0, 1.0, edge, dtype=np.float32)
++    horizontal[-edge:] = np.linspace(1.0, 0.0, edge, dtype=np.float32)
++    alpha = (vertical[:, None] * horizontal[None, :])[..., None]
++    return np.clip(
++        base_roi.astype(np.float32) * (1.0 - alpha)
++        + generated_roi.astype(np.float32) * alpha,
++        0,
++        255,
++    ).astype(np.uint8)
++
+ def load_avatar(avatar_id):
+     avatar_path = f"./data/avatars/{avatar_id}"
+     full_imgs_path = f"{avatar_path}/full_imgs" 
+@@ -107,6 +132,8 @@ class LipReal(BaseAvatar):
+         # self.idx = 0
+         # self.res_frame_queue = Queue(self.batch_size*2)
+         self.model = model
++        self.preserve_upper_face = opt.avatar_id == "interviewer_expression_test_v1"
++        self._blink_delivery_logged = False
+ 
+         self.frame_list_cycle,self.face_list_cycle,self.coord_list_cycle = avatar
+ 
+@@ -143,6 +170,13 @@ class LipReal(BaseAvatar):
+         combine_frame = self.frame_list_cycle[idx].copy()
+         y1, y2, x1, x2 = bbox
+         res_frame = cv2.resize(pred_frame.astype(np.uint8),(x2-x1,y2-y1))
+-        combine_frame[y1:y2, x1:x2] = res_frame
++        base_roi = combine_frame[y1:y2, x1:x2]
++        combine_frame[y1:y2, x1:x2] = blend_wav2lip_lower_face(
++            base_roi,
++            res_frame,
++            preserve_upper_face=self.preserve_upper_face,
++        )
++        if self.preserve_upper_face and not self._blink_delivery_logged and 51 <= idx <= 54:
++            logger.info("Expression blink reached video compositor (frame=%s)", idx)
++            self._blink_delivery_logged = True
+         return combine_frame
+-
+diff --git a/server/asr_server.py b/server/asr_server.py
+index 0cd84fa..7f1ec23 100644
+--- a/server/asr_server.py
++++ b/server/asr_server.py
+@@ -16,6 +16,7 @@ import json
+ import time
+ import io
+ import asyncio
++import os
+ import threading
+ import numpy as np
+ from aiohttp import web
+@@ -27,7 +28,10 @@ from utils.logger import logger
+ 
+ _sensevoice_model = None
+ _sensevoice_load_lock = threading.Lock()
+-_sensevoice_inference_lock = threading.Lock()
++ASR_INFERENCE_CONCURRENCY = max(1, int(os.getenv("ASR_INFERENCE_CONCURRENCY", "1")))
++ASR_MAX_PENDING = max(0, int(os.getenv("ASR_MAX_PENDING", "4")))
++_sensevoice_inference_slots = threading.BoundedSemaphore(ASR_INFERENCE_CONCURRENCY)
++_sensevoice_queue_slots = threading.BoundedSemaphore(ASR_INFERENCE_CONCURRENCY + ASR_MAX_PENDING)
+ 
+ 
+ def _load_sensevoice():
+@@ -89,7 +93,8 @@ def _run_inference(audio_float32: np.ndarray, sample_rate: int, use_itn: bool):
+     wav_buf.seek(0)
+ 
+     t0 = time.perf_counter()
+-    with _sensevoice_inference_lock:
++    _sensevoice_inference_slots.acquire()
++    try:
+         res = model.generate(
+             input=wav_buf,
+             cache={},
+@@ -97,6 +102,8 @@ def _run_inference(audio_float32: np.ndarray, sample_rate: int, use_itn: bool):
+             use_itn=use_itn,
+             batch_size_s=60,
+         )
++    finally:
++        _sensevoice_inference_slots.release()
+     inference_ms = (time.perf_counter() - t0) * 1000
+ 
+     text = ""
+@@ -119,6 +126,13 @@ def _run_inference(audio_float32: np.ndarray, sample_rate: int, use_itn: bool):
+ # ─── WebSocket Handler ─────────────────────────────────────────────────────
+ 
+ SAMPLE_RATE = 16000  # The browser client records at 16 kHz mono PCM16
++MAX_AUDIO_BYTES = SAMPLE_RATE * 2 * 10 * 60
++ALLOWED_BROWSER_ORIGINS = {
++    "http://127.0.0.1:4173",
++    "http://localhost:4173",
++    "http://127.0.0.1:5173",
++    "http://localhost:5173",
++}
+ 
+ 
+ async def asr_websocket_handler(request):
+@@ -143,6 +157,10 @@ async def asr_websocket_handler(request):
+            {"text":"hello world", "mode":"2pass-offline",
+             "is_final":true, "timestamp":null}
+     """
++    origin = request.headers.get("Origin")
++    if origin and origin not in ALLOWED_BROWSER_ORIGINS:
++        raise web.HTTPForbidden(text="Browser origin is not allowed")
++
+     ws = web.WebSocketResponse()
+     await ws.prepare(request)
+ 
+@@ -211,6 +229,22 @@ async def asr_websocket_handler(request):
+                     audio_float32 = audio_int16.astype(np.float32) / 32768.0
+                     use_itn = config.get("itn", False)
+ 
++                    # Bound the queue before executor threads start blocking on
++                    # the GPU. Keep inference serialized by default; increase it
++                    # only after measuring memory and latency on the target GPU.
++                    if not _sensevoice_queue_slots.acquire(blocking=False):
++                        logger.warning("[ASR] Inference queue is full")
++                        await ws.send_str(json.dumps({
++                            "text": "",
++                            "mode": config.get("mode", "offline"),
++                            "is_final": True,
++                            "timestamp": None,
++                            "error": "asr_busy",
++                            "retryable": True,
++                            "message": "语音识别任务较多，请稍后重新回答。",
++                        }, ensure_ascii=False))
++                        continue
++
+                     # Offload blocking inference to a thread
+                     loop = asyncio.get_event_loop()
+                     try:
+@@ -224,6 +258,8 @@ async def asr_websocket_handler(request):
+                     except Exception as e:
+                         logger.exception(f"[ASR] ❌ Inference failed: {e}")
+                         text = ""
++                    finally:
++                        _sensevoice_queue_slots.release()
+ 
+                     # Map the client mode to the response mode the frontend expects
+                     mode = config.get("mode", "offline")
+@@ -241,6 +277,10 @@ async def asr_websocket_handler(request):
+                     logger.info(f"[ASR] 📤 Result sent to client (mode={response_mode})")
+ 
+             elif msg.type == web.WSMsgType.BINARY:
++                if len(audio_buffer) + len(msg.data) > MAX_AUDIO_BYTES:
++                    logger.warning("[ASR] Audio session exceeded the 10 minute limit")
++                    await ws.close(code=1009, message=b"audio session too large")
++                    break
+                 audio_buffer.extend(msg.data)
+                 chunks_received += 1
+ 
+diff --git a/server/routes.py b/server/routes.py
+index af92091..4b8902b 100644
+--- a/server/routes.py
++++ b/server/routes.py
+@@ -149,6 +149,23 @@ async def is_speaking(request):
+         return json_error("session not found")
+     return json_ok(data=avatar_session.is_speaking())
+ 
++
++async def close_session(request):
++    """Release one WebRTC/avatar session immediately when the client leaves."""
++    try:
++        params = await request.json()
++        sessionid = str(params.get('sessionid', ''))
++        if not sessionid:
++            return json_error("sessionid is required")
++        rtc_manager = request.app.get("rtc_manager")
++        if rtc_manager is None:
++            return json_error("RTC manager not found")
++        closed = await rtc_manager.close_session(sessionid)
++        return json_ok(data={"closed": closed})
++    except Exception as e:
++        logger.exception('close_session exception:')
++        return json_error(str(e))
++
+ async def sse_handler(request):
+     """SSE 事件流，推送服务器状态更新到客户端"""
+     sessionid = request.query.get('sessionid', '')
+@@ -238,6 +255,7 @@ def setup_routes(app):
+     app.router.add_post("/record", record)
+     app.router.add_post("/interrupt_talk", interrupt_talk)
+     app.router.add_post("/is_speaking", is_speaking)
++    app.router.add_post("/api/session/close", close_session)
+     app.router.add_get("/api/admin/config", admin_config)
+     app.router.add_get("/api/admin/sessions", admin_sessions)
+     app.router.add_get('/sse', sse_handler)
+diff --git a/server/rtc_manager.py b/server/rtc_manager.py
+index d3e50a9..f2bddbf 100644
+--- a/server/rtc_manager.py
++++ b/server/rtc_manager.py
+@@ -6,6 +6,7 @@ import json
+ import asyncio
+ import random
+ import copy
++import os
+ from typing import Dict, Optional
+ import queue
+ 
+@@ -38,6 +39,15 @@ class RTCManager:
+         """
+         self.opt = opt
+         self.pcs: set = set()
++        self.connections: Dict[str, object] = {}
++
++    async def close_session(self, sessionid: str) -> bool:
++        """Close a WebRTC session explicitly instead of waiting for ICE timeout."""
++        cleanup = self.connections.get(sessionid)
++        if cleanup is None:
++            return False
++        await cleanup()
++        return True
+ 
+     async def handle_offer(self, request):
+         """处理 WebRTC offer 信令"""
+@@ -57,19 +67,72 @@ class RTCManager:
+         avatar_session = session_manager.get_session(sessionid)
+ 
+         # 创建 PeerConnection
+-        ice_server = RTCIceServer(urls=self.opt.stun) #'stun:stun.freeswitch.org:3478'
++        ice_servers = [RTCIceServer(urls=self.opt.stun)]
++        turn_url = os.getenv("TURN_URL", "").strip()
++        if turn_url:
++            turn_username = os.getenv("TURN_USERNAME", "").strip()
++            turn_credential = os.getenv("TURN_CREDENTIAL", "").strip()
++            if not turn_username or not turn_credential:
++                raise web.HTTPServiceUnavailable(
++                    text="TURN_URL requires TURN_USERNAME and TURN_CREDENTIAL"
++                )
++            ice_servers.append(RTCIceServer(
++                urls=turn_url,
++                username=turn_username,
++                credential=turn_credential,
++            ))
+         pc = RTCPeerConnection(
+-            configuration=RTCConfiguration(iceServers=[ice_server])
++            configuration=RTCConfiguration(iceServers=ice_servers)
+         )
+         self.pcs.add(pc)
+ 
++        disconnect_cleanup_task = None
++        cleanup_started = False
++        player = None
++
++        async def cleanup_connection():
++            nonlocal disconnect_cleanup_task, cleanup_started
++            if cleanup_started:
++                return
++            cleanup_started = True
++            self.connections.pop(sessionid, None)
++            if disconnect_cleanup_task and disconnect_cleanup_task is not asyncio.current_task():
++                disconnect_cleanup_task.cancel()
++            disconnect_cleanup_task = None
++            session_manager.remove_session(sessionid)
++            if player is not None:
++                await asyncio.to_thread(player.stop)
++            if pc.connectionState != "closed":
++                await pc.close()
++            self.pcs.discard(pc)
++
++        self.connections[sessionid] = cleanup_connection
++
++        async def cleanup_if_still_disconnected():
++            try:
++                await asyncio.sleep(10)
++                if pc.connectionState in ("connecting", "disconnected"):
++                    logger.warning(
++                        "Closing stale WebRTC session %s after state=%s",
++                        sessionid,
++                        pc.connectionState,
++                    )
++                    await cleanup_connection()
++            except asyncio.CancelledError:
++                pass
++
+         @pc.on("connectionstatechange")
+         async def on_connectionstatechange():
++            nonlocal disconnect_cleanup_task
+             logger.info("Connection state is %s", pc.connectionState)
++            if pc.connectionState == "connected" and disconnect_cleanup_task:
++                disconnect_cleanup_task.cancel()
++                disconnect_cleanup_task = None
++            elif pc.connectionState in ("connecting", "disconnected"):
++                if not disconnect_cleanup_task or disconnect_cleanup_task.done():
++                    disconnect_cleanup_task = asyncio.create_task(cleanup_if_still_disconnected())
+             if pc.connectionState in ("failed", "closed"):
+-                await pc.close()
+-                self.pcs.discard(pc)
+-                session_manager.remove_session(sessionid)
++                await cleanup_connection()
+ 
+         # 添加发送轨道
+         from server.webrtc import HumanPlayer
+@@ -132,6 +195,9 @@ class RTCManager:
+ 
+     async def shutdown(self):
+         """关闭所有 PeerConnection"""
++        coros = [cleanup() for cleanup in list(self.connections.values())]
++        await asyncio.gather(*coros)
+         coros = [pc.close() for pc in self.pcs]
+         await asyncio.gather(*coros)
+         self.pcs.clear()
++        self.connections.clear()
+diff --git a/server/session_manager.py b/server/session_manager.py
+index 560b281..6a5674e 100644
+--- a/server/session_manager.py
++++ b/server/session_manager.py
+@@ -35,6 +35,7 @@ class SessionManager:
+             self.sessions: Dict[str, BaseAvatar] = {}
+             self.build_session_fn = None
+             self.max_session = 1   # default, override via set_max_session()
++            self._create_lock = asyncio.Lock()
+             self.initialized = True
+ 
+     def set_max_session(self, n: int):
+@@ -64,21 +65,25 @@ class SessionManager:
+         if sessionid is None:
+             sessionid = _rand_session_id()
+             
+-        # 检查是否达到最大会话数
+-        active_count = sum(1 for s in self.sessions.values() if s is not None)
+-        if active_count >= self.max_session:
+-            raise MaxSessionError(
+-                f"Maximum session limit reached ({active_count}/{self.max_session})"
+-            )
+-
+-        logger.info('Creating sessionid=%s, current session num=%d', sessionid, active_count)
+-        # 预先占位防止重复
+-        self.sessions[sessionid] = None
++        # 在耗时构建器让出事件循环前原子占位；构建中的会话也计入上限。
++        async with self._create_lock:
++            active_count = len(self.sessions)
++            if active_count >= self.max_session:
++                raise MaxSessionError(
++                    f"Maximum session limit reached ({active_count}/{self.max_session})"
++                )
++            if sessionid in self.sessions:
++                raise MaxSessionError(f"Session already exists ({sessionid})")
++            logger.info('Creating sessionid=%s, current session num=%d', sessionid, active_count)
++            self.sessions[sessionid] = None
+ 
+-        # 在线程池中构建 session（加载模型非常耗时）
+-        avatar_session = await asyncio.get_event_loop().run_in_executor(
+-            None, self.build_session_fn, sessionid, params
+-        )
++        try:
++            avatar_session = await asyncio.get_event_loop().run_in_executor(
++                None, self.build_session_fn, sessionid, params
++            )
++        except Exception:
++            self.sessions.pop(sessionid, None)
++            raise
+         self.sessions[sessionid] = avatar_session
+         return sessionid
+         
+diff --git a/server/webrtc.py b/server/webrtc.py
+index 3382cc9..a01a1a4 100644
+--- a/server/webrtc.py
++++ b/server/webrtc.py
+@@ -248,5 +248,10 @@ class HumanPlayer:
+             #self.__container.close()
+             self.__container = None
+ 
++    def stop(self) -> None:
++        """Stop both outgoing tracks and wait for the render worker to exit."""
++        self.__audio.stop()
++        self.__video.stop()
++
+     def __log_debug(self, msg: str, *args) -> None:
+         mylogger.debug(f"HumanPlayer {msg}", *args)

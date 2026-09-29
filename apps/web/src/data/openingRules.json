@@ -1,0 +1,97 @@
+{
+  "id": "opening-rules-v1",
+  "policy": {
+    "threshold": 3,
+    "window_seconds": 86400,
+    "cooldown_seconds": 1800,
+    "pause_max_seconds": 600,
+    "max_invalid_answers": 3
+  },
+  "segments": [
+    {
+      "title": "欢迎入座",
+      "text": "欢迎来到数字人面试。听完提问再回答，答完请点结束。"
+    },
+    {
+      "title": "自然表达",
+      "text": "没有持续有效表达，会出现五秒结束倒计时，咳嗽不算有效回答。"
+    },
+    {
+      "title": "临时有事，可以暂停",
+      "text": "有急事，点右上方暂停。每场一次，最长十分钟，超时结束并保存已有记录。"
+    },
+    {
+      "title": "保护你的面试进度",
+      "text": "不要直接关闭网页，以免内容丢失。"
+    },
+    {
+      "title": "强退与冷却",
+      "text": "二十四小时内，前两次强退只提醒，第三次冷却三十分钟。"
+    },
+    {
+      "title": "偶发故障不计入",
+      "text": "偶发断网或设备故障不计入。连续三次无效回答也会结束面试。"
+    },
+    {
+      "title": "把这里当作一次练习",
+      "text": "放轻松，我们一起开始。"
+    }
+  ],
+  "duration": 31.56,
+  "fps": 25,
+  "frames": 789,
+  "width": 768,
+  "height": 512,
+  "captions": [
+    {
+      "title": "欢迎入座",
+      "text": "欢迎来到数字人面试。听完提问再回答，答完请点结束。",
+      "start": 0.25,
+      "end": 4.9354
+    },
+    {
+      "title": "自然表达",
+      "text": "没有持续有效表达，会出现五秒结束倒计时，咳嗽不算有效回答。",
+      "start": 5.0554,
+      "end": 10.0539
+    },
+    {
+      "title": "临时有事，可以暂停",
+      "text": "有急事，点右上方暂停。每场一次，最长十分钟，超时结束并保存已有记录。",
+      "start": 10.1739,
+      "end": 16.6418
+    },
+    {
+      "title": "保护你的面试进度",
+      "text": "不要直接关闭网页，以免内容丢失。",
+      "start": 16.7618,
+      "end": 19.327
+    },
+    {
+      "title": "强退与冷却",
+      "text": "二十四小时内，前两次强退只提醒，第三次冷却三十分钟。",
+      "start": 19.447,
+      "end": 23.9285
+    },
+    {
+      "title": "偶发故障不计入",
+      "text": "偶发断网或设备故障不计入。连续三次无效回答也会结束面试。",
+      "start": 24.0485,
+      "end": 28.9954
+    },
+    {
+      "title": "把这里当作一次练习",
+      "text": "放轻松，我们一起开始。",
+      "start": 29.1154,
+      "end": 31.0324
+    }
+  ],
+  "file": "opening-rules-v1.mp4",
+  "voice": "Microsoft Huihui Desktop, SAPI rate 3; not post-accelerated",
+  "sha256": "106a660d0c24b90fa542d7de62cb6966182e066de220bf33282ce63fcd30b63e",
+  "bytes": 854232,
+  "source": "approved live blink cache; mouth generated offline with same production blend",
+  "upper_face_difference_max": 0,
+  "render_seconds": 9.17775596699994,
+  "blend_sha256": "e6607c4edb9553a2ab64f21adb54b10e0310d160cbeec63b66b77b6f274fc918"
+}

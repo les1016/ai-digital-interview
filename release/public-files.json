@@ -1,0 +1,414 @@
+[
+  {
+    "source": ".agents/skills/interview-release-audit/SKILL.md",
+    "target": ".agents/skills/interview-release-audit/SKILL.md"
+  },
+  {
+    "source": ".env.example",
+    "target": ".env.example"
+  },
+  {
+    "source": "apps/server/app/__init__.py",
+    "target": "apps/server/app/__init__.py"
+  },
+  {
+    "source": "apps/server/app/answer_corrections.py",
+    "target": "apps/server/app/answer_corrections.py"
+  },
+  {
+    "source": "apps/server/app/avatar_cues.py",
+    "target": "apps/server/app/avatar_cues.py"
+  },
+  {
+    "source": "apps/server/app/coordination.py",
+    "target": "apps/server/app/coordination.py"
+  },
+  {
+    "source": "apps/server/app/document_conversion.py",
+    "target": "apps/server/app/document_conversion.py"
+  },
+  {
+    "source": "apps/server/app/document_exports.py",
+    "target": "apps/server/app/document_exports.py"
+  },
+  {
+    "source": "apps/server/app/main.py",
+    "target": "apps/server/app/main.py"
+  },
+  {
+    "source": "apps/server/app/passwords.py",
+    "target": "apps/server/app/passwords.py"
+  },
+  {
+    "source": "apps/web/.env.example",
+    "target": "apps/web/.env.example"
+  },
+  {
+    "source": "apps/web/index.html",
+    "target": "apps/web/index.html"
+  },
+  {
+    "source": "apps/web/package.json",
+    "target": "apps/web/package.json"
+  },
+  {
+    "source": "apps/web/pnpm-lock.yaml",
+    "target": "apps/web/pnpm-lock.yaml"
+  },
+  {
+    "source": "apps/web/src/AdminDashboard.jsx",
+    "target": "apps/web/src/AdminDashboard.jsx"
+  },
+  {
+    "source": "apps/web/src/AdminOperations.jsx",
+    "target": "apps/web/src/AdminOperations.jsx"
+  },
+  {
+    "source": "apps/web/src/AdminScriptedDemo.jsx",
+    "target": "apps/web/src/AdminScriptedDemo.jsx"
+  },
+  {
+    "source": "apps/web/src/App.jsx",
+    "target": "apps/web/src/App.jsx"
+  },
+  {
+    "source": "apps/web/src/AuthDialog.jsx",
+    "target": "apps/web/src/AuthDialog.jsx"
+  },
+  {
+    "source": "apps/web/src/InterviewRoom.jsx",
+    "target": "apps/web/src/InterviewRoom.jsx"
+  },
+  {
+    "source": "apps/web/src/OpeningRulesNotice.jsx",
+    "target": "apps/web/src/OpeningRulesNotice.jsx"
+  },
+  {
+    "source": "apps/web/src/ParticleField.jsx",
+    "target": "apps/web/src/ParticleField.jsx"
+  },
+  {
+    "source": "apps/web/src/UnityAvatar.jsx",
+    "target": "apps/web/src/UnityAvatar.jsx"
+  },
+  {
+    "source": "apps/web/src/Workspace.jsx",
+    "target": "apps/web/src/Workspace.jsx"
+  },
+  {
+    "source": "apps/web/src/acknowledgmentPlayer.js",
+    "target": "apps/web/src/acknowledgmentPlayer.js"
+  },
+  {
+    "source": "apps/web/src/acknowledgmentPolicy.js",
+    "target": "apps/web/src/acknowledgmentPolicy.js"
+  },
+  {
+    "source": "apps/web/src/adminAvatarLoad.js",
+    "target": "apps/web/src/adminAvatarLoad.js"
+  },
+  {
+    "source": "apps/web/src/answerCorrections.css",
+    "target": "apps/web/src/answerCorrections.css"
+  },
+  {
+    "source": "apps/web/src/api.js",
+    "target": "apps/web/src/api.js"
+  },
+  {
+    "source": "apps/web/src/avatarActionCoordinator.js",
+    "target": "apps/web/src/avatarActionCoordinator.js"
+  },
+  {
+    "source": "release/demo-public.json",
+    "target": "apps/web/src/data/adminInterviewScript.json"
+  },
+  {
+    "source": "apps/web/src/data/openingRules.json",
+    "target": "apps/web/src/data/openingRules.json"
+  },
+  {
+    "source": "apps/web/src/main.jsx",
+    "target": "apps/web/src/main.jsx"
+  },
+  {
+    "source": "apps/web/src/mobile.css",
+    "target": "apps/web/src/mobile.css"
+  },
+  {
+    "source": "apps/web/src/openingPolicy.js",
+    "target": "apps/web/src/openingPolicy.js"
+  },
+  {
+    "source": "apps/web/src/smilePolicy.js",
+    "target": "apps/web/src/smilePolicy.js"
+  },
+  {
+    "source": "apps/web/src/styles.css",
+    "target": "apps/web/src/styles.css"
+  },
+  {
+    "source": "apps/web/src/useAcknowledgment.jsx",
+    "target": "apps/web/src/useAcknowledgment.jsx"
+  },
+  {
+    "source": "apps/web/src/useAdminStartupDiagnostics.jsx",
+    "target": "apps/web/src/useAdminStartupDiagnostics.jsx"
+  },
+  {
+    "source": "apps/web/src/useOpeningVideo.jsx",
+    "target": "apps/web/src/useOpeningVideo.jsx"
+  },
+  {
+    "source": "apps/web/src/useSmileAction.jsx",
+    "target": "apps/web/src/useSmileAction.jsx"
+  },
+  {
+    "source": "apps/web/vite.config.js",
+    "target": "apps/web/vite.config.js"
+  },
+  {
+    "source": "deploy/.env.production.example",
+    "target": "deploy/.env.production.example"
+  },
+  {
+    "source": "deploy/ai-interview-api.service",
+    "target": "deploy/ai-interview-api.service"
+  },
+  {
+    "source": "deploy/ai-interview-livetalking.service",
+    "target": "deploy/ai-interview-livetalking.service"
+  },
+  {
+    "source": "deploy/compose.infrastructure.yml",
+    "target": "deploy/compose.infrastructure.yml"
+  },
+  {
+    "source": "deploy/nginx.conf.template",
+    "target": "deploy/nginx.conf.template"
+  },
+  {
+    "source": "docs/PUBLICATION-SECURITY.md",
+    "target": "docs/PUBLICATION-SECURITY.md"
+  },
+  {
+    "source": "docs/THIRD_PARTY.md",
+    "target": "docs/THIRD_PARTY.md"
+  },
+  {
+    "source": "pyproject.toml",
+    "target": "pyproject.toml"
+  },
+  {
+    "source": "release/LICENSE-MIT.txt",
+    "target": "release/LICENSE-MIT.txt"
+  },
+  {
+    "source": "release/README-public.md",
+    "target": "release/README-public.md"
+  },
+  {
+    "source": "release/demo-public.json",
+    "target": "release/demo-public.json"
+  },
+  {
+    "source": "release/public-files.json",
+    "target": "release/public-files.json"
+  },
+  {
+    "source": "release/public.gitignore",
+    "target": "release/public.gitignore"
+  },
+  {
+    "source": "scripts/backup-data.ps1",
+    "target": "scripts/backup-data.ps1"
+  },
+  {
+    "source": "scripts/backup_data.py",
+    "target": "scripts/backup_data.py"
+  },
+  {
+    "source": "scripts/configure-local.ps1",
+    "target": "scripts/configure-local.ps1"
+  },
+  {
+    "source": "scripts/convert-docx-to-pdf.ps1",
+    "target": "scripts/convert-docx-to-pdf.ps1"
+  },
+  {
+    "source": "scripts/local_setup.py",
+    "target": "scripts/local_setup.py"
+  },
+  {
+    "source": "scripts/manage_admin.py",
+    "target": "scripts/manage_admin.py"
+  },
+  {
+    "source": "scripts/public_release.py",
+    "target": "scripts/public_release.py"
+  },
+  {
+    "source": "scripts/restore-data.ps1",
+    "target": "scripts/restore-data.ps1"
+  },
+  {
+    "source": "scripts/restore_data.py",
+    "target": "scripts/restore_data.py"
+  },
+  {
+    "source": "scripts/setup-local.ps1",
+    "target": "scripts/setup-local.ps1"
+  },
+  {
+    "source": "scripts/start-all.ps1",
+    "target": "scripts/start-all.ps1"
+  },
+  {
+    "source": "scripts/start-cosyvoice.sh",
+    "target": "scripts/start-cosyvoice.sh"
+  },
+  {
+    "source": "scripts/start-livetalking.sh",
+    "target": "scripts/start-livetalking.sh"
+  },
+  {
+    "source": "scripts/stop-all.ps1",
+    "target": "scripts/stop-all.ps1"
+  },
+  {
+    "source": "tests/acknowledgment_player.test.mjs",
+    "target": "tests/acknowledgment_player.test.mjs"
+  },
+  {
+    "source": "tests/admin_avatar_load.test.mjs",
+    "target": "tests/admin_avatar_load.test.mjs"
+  },
+  {
+    "source": "tests/opening_policy.test.mjs",
+    "target": "tests/opening_policy.test.mjs"
+  },
+  {
+    "source": "tests/smile_actions.test.mjs",
+    "target": "tests/smile_actions.test.mjs"
+  },
+  {
+    "source": "tests/test_answer_corrections.py",
+    "target": "tests/test_answer_corrections.py"
+  },
+  {
+    "source": "tests/test_api.py",
+    "target": "tests/test_api.py"
+  },
+  {
+    "source": "tests/test_avatar_cues.py",
+    "target": "tests/test_avatar_cues.py"
+  },
+  {
+    "source": "tests/test_backup.py",
+    "target": "tests/test_backup.py"
+  },
+  {
+    "source": "tests/test_coordination.py",
+    "target": "tests/test_coordination.py"
+  },
+  {
+    "source": "tests/test_local_setup.py",
+    "target": "tests/test_local_setup.py"
+  },
+  {
+    "source": "tests/test_public_release.py",
+    "target": "tests/test_public_release.py"
+  },
+  {
+    "source": "tests/test_scripts.py",
+    "target": "tests/test_scripts.py"
+  },
+  {
+    "source": "uv.lock",
+    "target": "uv.lock"
+  },
+  {
+    "source": "一键停止.cmd",
+    "target": "一键停止.cmd"
+  },
+  {
+    "source": "一键初始化.cmd",
+    "target": "一键初始化.cmd"
+  },
+  {
+    "source": "一键启动.cmd",
+    "target": "一键启动.cmd"
+  },
+  {
+    "source": "发布前检查.cmd",
+    "target": "发布前检查.cmd"
+  },
+  {
+    "source": "备份项目数据.cmd",
+    "target": "备份项目数据.cmd"
+  },
+  {
+    "source": "配置密钥与管理员.cmd",
+    "target": "配置密钥与管理员.cmd"
+  },
+  {
+    "source": "release/README-public.md",
+    "target": "README.md"
+  },
+  {
+    "source": "docs/PUBLICATION-SECURITY.md",
+    "target": "SECURITY.md"
+  },
+  {
+    "source": "release/LICENSE-MIT.txt",
+    "target": "LICENSE"
+  },
+  {
+    "source": "release/public.gitignore",
+    "target": ".gitignore"
+  },
+  {
+    "source": "release/privacy-check.yml",
+    "target": "release/privacy-check.yml"
+  },
+  {
+    "source": "scripts/export-public.ps1",
+    "target": "scripts/export-public.ps1"
+  },
+  {
+    "source": "导出GitHub源码.cmd",
+    "target": "导出GitHub源码.cmd"
+  },
+  {
+    "source": "scripts/check_setup_preview.py",
+    "target": "scripts/check_setup_preview.py"
+  },
+  {
+    "source": "scripts/check_public_build.mjs",
+    "target": "scripts/check_public_build.mjs"
+  },
+  {
+    "source": "release/privacy-check.yml",
+    "target": ".github/workflows/privacy-check.yml"
+  },
+  {
+    "source": "scripts/process-arguments.ps1",
+    "target": "scripts/process-arguments.ps1"
+  },
+  {
+    "source": "仅启动网页与后端.cmd",
+    "target": "仅启动网页与后端.cmd"
+  },
+  {
+    "source": "tests/test_native_launch.py",
+    "target": "tests/test_native_launch.py"
+  },
+  {
+    "source": "tests/test_public_smoke.py",
+    "target": "tests/test_public_smoke.py"
+  },
+  {
+    "source": "tests/public_smoke_worker.py",
+    "target": "tests/public_smoke_worker.py"
+  }
+]

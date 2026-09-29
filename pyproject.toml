@@ -1,0 +1,27 @@
+[project]
+name = "ai-digital-interview"
+version = "0.1.0"
+description = "面向大学生的中文 AI 数字人模拟面试系统"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+  "fastapi>=0.115.0",
+  "httpx>=0.28.0",
+  "pillow>=10.0.0",
+  "pydantic-settings>=2.0.0",
+  "psycopg[binary]>=3.2.0",
+  "pyjwt>=2.9.0",
+  "pymupdf>=1.25.0",
+  "pypdf>=5.0.0",
+  "python-dotenv>=1.0.0",
+  "python-docx>=1.1.2",
+  "reportlab>=4.2.0",
+  "python-multipart>=0.0.12",
+  "qrcode[pil]>=8.0.0",
+  "rapidocr-onnxruntime>=1.4.0",
+  "redis>=5.2.0",
+  "sqlalchemy>=2.0.0",
+  "uvicorn[standard]>=0.30.0",
+]
+
+[tool.uv]
+package = false

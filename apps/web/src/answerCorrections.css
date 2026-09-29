@@ -1,0 +1,23 @@
+.answer-correction {
+  margin: 14px 0; padding: 17px; border: 1px solid #d4c7ae;
+  border-radius: 16px; background: #fff9ec; color: #443c30;
+  font-size: 14px; line-height: 1.6; overflow-wrap: anywhere;
+}
+.answer-correction > b { display: block; font-size: 16px; color: #6d532b; }
+.answer-correction p { margin: 8px 0; }
+.answer-correction dl { margin: 12px 0; padding: 12px; background: #fff; border-radius: 10px; max-height: 240px; overflow-y: auto; }
+.answer-correction dt { font-size: 12px; color: #796950; }
+.answer-correction dd { margin: 3px 0 12px; white-space: pre-wrap; }
+.answer-correction dd:last-child { margin-bottom: 0; }
+.correction-controls { display: flex; flex-wrap: wrap; gap: 9px; margin: 12px 0; }
+.correction-controls button { flex: 1 1 100px; min-height: 44px; border: 1px solid #b8b09e; border-radius: 10px; padding: 9px 12px; cursor: pointer; font: inherit; }
+.correction-controls button:disabled { opacity: .5; cursor: not-allowed; }
+.answer-correction.confirmed, .correction-audit { background: #eef8f1; border-color: #b7d5bd; }
+.answer-correction.cancelled { background: #f5f4f0; }
+.correction-audit { padding: 12px; border-radius: 10px; white-space: pre-wrap; }
+.correction-audit > b { display: block; margin-bottom: 4px; color: #285c42; }
+@media (max-width: 900px) {
+  /* The sticky answer toolbar must not cover the edit preview or confirmation. */
+  .candidate-panel:has(.answer-correction.pending) .room-actions { position: static; }
+  .candidate-panel .answer-correction { width: 100%; box-sizing: border-box; }
+}

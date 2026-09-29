@@ -1,0 +1,19 @@
+[Unit]
+Description=AI Interview LiveTalking and ASR service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ai-interview
+Group=ai-interview
+WorkingDirectory=/srv/ai-interview
+EnvironmentFile=/srv/ai-interview/.env.production
+ExecStart=/usr/bin/bash /srv/ai-interview/scripts/start-livetalking.sh
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

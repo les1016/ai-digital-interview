@@ -1,0 +1,21 @@
+[Unit]
+Description=AI Interview FastAPI service
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ai-interview
+Group=ai-interview
+WorkingDirectory=/srv/ai-interview/apps/server
+EnvironmentFile=/srv/ai-interview/.env.production
+ExecStart=/srv/ai-interview/.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 4 --proxy-headers --forwarded-allow-ips 127.0.0.1
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=30
+LimitNOFILE=65535
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

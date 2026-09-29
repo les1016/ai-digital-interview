@@ -1,0 +1,15 @@
+name: Offline publication privacy check
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  current-source-tree:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Scan source tree without installing project dependencies
+        run: python3 scripts/public_release.py --check-tree .
+# This checks the current checkout, NOT prior commits, Git metadata or provider balances.
+# No API keys or GitGuardian credentials are required. Still review BEFORE pushing.
