@@ -17,6 +17,13 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 MAX_FILE = 8 * 1024 * 1024
 MAX_TOTAL = 40 * 1024 * 1024
+# Exact files visually reviewed with fictional fixtures. Never allow arbitrary PNGs.
+# A changed pixel or metadata byte requires fresh human review and a new digest.
+REVIEWED_PREVIEWS = {
+    "docs/images/workspace.png": "9b3b38728cf14d0005e8caf0e97972720aaed4386009cc325db9eaf603179845",
+    "docs/images/report.png": "ea788c763c16e06568aac14d92d21a37cac59e958e4f4e10fd34aac591bc3d71",
+    "docs/images/admin-summary.png": "d8a608c04f8ecb658eafc6f771c18c740a6d3d607265db41bb9e37b5ef05247b",
+}
 ALLOWED_SUFFIXES = {".py", ".js", ".jsx", ".mjs", ".cjs", ".css", ".html", ".json", ".md", ".txt", ".toml", ".lock", ".yaml", ".yml", ".ps1", ".sh", ".cmd", ".bat", ".example", ".template", ".patch", ".svg"}
 ALLOWED_SUFFIXES.update({".gitignore", ".service"})
 ALLOWED_NAMES = {"LICENSE", ".gitignore", ".gitattributes"}
@@ -63,7 +70,7 @@ def check_name(relative: str) -> list[str]:
         findings.append("private-or-generated-directory")
     if name.startswith(".env") and not name.endswith(".example"):
         findings.append("private-env")
-    if path.name not in ALLOWED_NAMES and path.suffix.casefold() not in ALLOWED_SUFFIXES:
+    if relative not in REVIEWED_PREVIEWS and path.name not in ALLOWED_NAMES and path.suffix.casefold() not in ALLOWED_SUFFIXES:
         findings.append("unreviewed-file-type")
     if any(part in {".jwt_secret", ".setup.lock"} for part in parts):
         findings.append("private-runtime-file")
@@ -74,6 +81,10 @@ def inspect_bytes(relative: str, blob: bytes, known_private=()) -> list[dict]:
     issues = [{"path": relative, "rule": rule} for rule in check_name(relative)]
     if len(blob) > MAX_FILE:
         return issues + [{"path": relative, "rule": "file-too-large-to-review"}]
+    if relative in REVIEWED_PREVIEWS:
+        if not blob.startswith(b"\x89PNG\r\n\x1a\n") or hashlib.sha256(blob).hexdigest() != REVIEWED_PREVIEWS[relative]:
+            issues.append({"path": relative, "rule": "preview-image-not-reviewed"})
+        return issues  # Digest pins a human-reviewed image; not an OCR/privacy claim.
     try:
         content = blob.decode("utf-8-sig")
     except UnicodeError:
@@ -174,7 +185,7 @@ def export(root: Path, destination: Path | None = None) -> dict:
     issues = validate(files, private_values(root))
     if issues:
         return {"ok": False, "issues": issues, "files": len(files)}
-    report = {"ok": True, "files": len(files), "bytes": sum(map(len, files.values())), "issues": [], "scope": "allowlisted UTF-8 source; no model/media/runtime data; not a full Git history audit"}
+    report = {"ok": True, "files": len(files), "bytes": sum(map(len, files.values())), "issues": [], "scope": "allowlisted UTF-8 source and digest-pinned fictional UI previews; no private model/media/runtime data; not a full Git history audit"}
     if destination is None:
         return report
     # Never overwrite another export or copy into the working source/dependency trees.

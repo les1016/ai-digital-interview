@@ -7,6 +7,15 @@ from scripts import public_release as release
 
 
 class PublicReleaseTests(unittest.TestCase):
+    def test_only_exact_reviewed_preview_bytes_are_allowed(self):
+        for name in release.REVIEWED_PREVIEWS:
+            blob = (release.ROOT / name).read_bytes()
+            self.assertFalse(release.inspect_bytes(name, blob))
+            self.assertTrue(release.inspect_bytes(name, blob + b"changed"))
+            self.assertTrue(release.inspect_bytes(name, b"fake png"))
+            self.assertTrue(release.inspect_bytes("docs/images/unreviewed.png", blob))
+            self.assertTrue(release.inspect_bytes(name.upper(), blob))
+
     def test_nonexistent_scan_root_never_passes(self):
         with tempfile.TemporaryDirectory() as folder:
             self.assertFalse(release.check_tree(Path(folder) / "does-not-exist")["ok"])

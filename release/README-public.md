@@ -1,5 +1,11 @@
 # AI数字人面试
 
+**中文模拟面试 · 简历与岗位 JD · 数字人交互 · 成长报告**
+
+[界面预览](docs/PREVIEW.md) · [本地运行](#windows-本地首次运行) · [功能一览](#可以研究哪些功能) · [上游致谢](#项目来源与致谢) · [问题反馈](https://github.com/les1016/ai-digital-interview/issues)
+
+[![发布隐私检查](https://github.com/les1016/ai-digital-interview/actions/workflows/privacy-check.yml/badge.svg)](https://github.com/les1016/ai-digital-interview/actions/workflows/privacy-check.yml)
+
 **一个面向大学生的中文面试练习与复盘系统，也是一份可供学习和二次开发的 Web + AI 工程实践。**
 
 求职练习不应该停留在“回答完几个问题，得到一个分数”。本项目把简历、岗位要求、多轮追问和面试复盘串起来，让练习者知道自己说清楚了什么、还缺哪些证据，以及下一次可以怎样改进。页面保留温暖、低压力的学生成长空间风格，并提供移动端布局。
@@ -17,6 +23,27 @@
 - **本地适配**：对 LiveTalking 的启动、会话、ASR、音视频接口及嘴部推理链路进行了修改，以 [差异补丁](release/patches/livetalking-local.patch) 提供；基于上游提交 [a5a77f4](https://github.com/lipku/LiveTalking/commit/a5a77f4c395c8347789a16da1843cd1b08b48eea)，不是对上游最新版的兼容承诺。
 
 这是独立维护的面试场景应用，不是 LiveTalking 官方产品，也不代表上游作者认可或背书。本仓库自己的业务代码采用 MIT；LiveTalking 原代码及相关派生修改保留其 Apache-2.0 许可边界，随附 [上游许可证与版权声明](release/patches/LiveTalking-LICENSE.txt)。Wav2Lip 等模型另有使用条件，不能用本仓库的 MIT 许可替代，详见 [第三方组件说明](docs/THIRD_PARTY.md)。
+
+## 先看看界面
+
+以下为实际前端页面，全部使用**虚构数据**，不是实际模型评分；截图时未连接私人数据库、模型或摄像头。不含数字人肖像素材，也不是在线体验入口。
+
+![学生工作台：简历准备与历史报告](docs/images/workspace.png)
+
+<details>
+<summary>查看成长报告与管理员复盘</summary>
+
+### 成长报告：保留信心，也给出下一步
+
+![成长报告：匹配依据、能力维度和具体改进建议](docs/images/report.png)
+
+### 管理员：结果、摘要、用户文档分开查看
+
+![管理员面试摘要：问答重点与教练提示](docs/images/admin-summary.png)
+
+</details>
+
+[查看大图、演示数据说明与体验边界 →](docs/PREVIEW.md)
 
 ## 适合谁
 
