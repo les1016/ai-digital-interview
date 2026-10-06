@@ -17,9 +17,10 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 MAX_FILE = 8 * 1024 * 1024
 MAX_TOTAL = 40 * 1024 * 1024
-# Exact files visually reviewed with fictional fixtures. Never allow arbitrary PNGs.
+# Exact visually reviewed previews. Never allow arbitrary PNGs.
 # A changed pixel or metadata byte requires fresh human review and a new digest.
 REVIEWED_PREVIEWS = {
+    "docs/images/interviewer-preview.png": "ba4ec30e0b147b56c2e60ec29c132c1db12bf305ca3cc3a9d47652af61014ed5",
     "docs/images/workspace.png": "9b3b38728cf14d0005e8caf0e97972720aaed4386009cc325db9eaf603179845",
     "docs/images/report.png": "ea788c763c16e06568aac14d92d21a37cac59e958e4f4e10fd34aac591bc3d71",
     "docs/images/admin-summary.png": "d8a608c04f8ecb658eafc6f771c18c740a6d3d607265db41bb9e37b5ef05247b",
@@ -185,7 +186,7 @@ def export(root: Path, destination: Path | None = None) -> dict:
     issues = validate(files, private_values(root))
     if issues:
         return {"ok": False, "issues": issues, "files": len(files)}
-    report = {"ok": True, "files": len(files), "bytes": sum(map(len, files.values())), "issues": [], "scope": "allowlisted UTF-8 source and digest-pinned fictional UI previews; no private model/media/runtime data; not a full Git history audit"}
+    report = {"ok": True, "files": len(files), "bytes": sum(map(len, files.values())), "issues": [], "scope": "allowlisted UTF-8 source and digest-pinned presentation previews; no private model/media/runtime data; not a full Git history audit"}
     if destination is None:
         return report
     # Never overwrite another export or copy into the working source/dependency trees.

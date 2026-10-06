@@ -1,4 +1,5 @@
 [
+  { "source": "docs/images/interviewer-preview.png", "target": "docs/images/interviewer-preview.png" },
   { "source": "docs/images/workspace.png", "target": "docs/images/workspace.png" },
   { "source": "docs/images/report.png", "target": "docs/images/report.png" },
   { "source": "docs/images/admin-summary.png", "target": "docs/images/admin-summary.png" },
