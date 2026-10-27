@@ -4,6 +4,15 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 LIVETALKING_ROOT="${PROJECT_ROOT}/integrations/LiveTalking"
+# WSL NAT cannot reach the Windows API through its own loopback address.
+if grep -qi microsoft /proc/sys/kernel/osrelease; then
+  export INTERVIEW_AUTH_MODE="local-ticket"
+  export INTERVIEW_PROJECT_ROOT="${PROJECT_ROOT}"
+  if ! /opt/miniconda/envs/livetalking/bin/python -c "import jwt" >/dev/null 2>&1; then
+    echo "Missing PyJWT in LiveTalking environment; install PyJWT>=2.9 before starting." >&2
+    exit 2
+  fi
+fi
 PYTHON_BIN="/opt/miniconda/envs/livetalking/bin/python"
 LOG_DIR="${PROJECT_ROOT}/logs"
 AVATAR_ID="wav2lip_avatar_female_model"

@@ -146,3 +146,30 @@ export async function apiBlob(path, options = {}) {
     signal?.removeEventListener('abort', abortFromCaller)
   }
 }
+
+let avatarTicketCache = null
+let avatarTicketPending = null
+async function getAvatarTicket() {
+  const accessToken = getToken()
+  if (avatarTicketCache?.accessToken === accessToken && avatarTicketCache.expires > Date.now()) return avatarTicketCache.token
+  if (avatarTicketPending?.accessToken === accessToken) return avatarTicketPending.promise
+  const pending = { accessToken, promise: null }
+  pending.promise = api('/avatar/token', { method: 'POST' }).then(result => {
+    if (getToken() !== accessToken) throw new Error('登录状态已改变，请重试')
+    avatarTicketCache = { accessToken, token: result.token, expires: Date.now() + 60000 }
+    return result.token
+  }).finally(() => { if (avatarTicketPending === pending) avatarTicketPending = null })
+  avatarTicketPending = pending
+  return pending.promise
+}
+
+export async function avatarFetch(url, options = {}) {
+  const headers = new Headers(options.headers || {})
+  headers.set('Authorization', `Bearer ${await getAvatarTicket()}`)
+  return fetch(url, { ...options, headers })
+}
+
+export async function avatarSocket(url) {
+  const ticket = await getAvatarTicket()
+  return new WebSocket(url, ['asr', `auth.${ticket}`])
+}

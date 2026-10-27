@@ -1,3 +1,4 @@
+import { avatarFetch } from './api'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Activity, ArrowLeft, Bug, Camera, CheckCircle2, CircleStop, Clock3, Download,
@@ -127,7 +128,7 @@ export default function AdminScriptedDemo({ onExit }) {
     window.speechSynthesis?.cancel()
     const avatarSessionId = sessionRef.current
     if (avatarSessionId) {
-      fetch(`${LIVETALKING_BASE}/api/session/close`, {
+      avatarFetch(`${LIVETALKING_BASE}/api/session/close`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ sessionid: avatarSessionId }),
@@ -206,7 +207,7 @@ export default function AdminScriptedDemo({ onExit }) {
         })
       }
       if (!current()) throw new Error('连接操作已取消')
-      const response = await fetch(`${LIVETALKING_BASE}/offer`, {
+      const response = await avatarFetch(`${LIVETALKING_BASE}/offer`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ sdp: pc.localDescription.sdp, type: pc.localDescription.type }),
@@ -228,7 +229,7 @@ export default function AdminScriptedDemo({ onExit }) {
       return sessionRef.current
     } catch (reason) {
       pc.close()
-      if (allocatedSessionId) fetch(`${LIVETALKING_BASE}/api/session/close`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sessionid: allocatedSessionId }), keepalive: true }).catch(() => {})
+      if (allocatedSessionId) avatarFetch(`${LIVETALKING_BASE}/api/session/close`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sessionid: allocatedSessionId }), keepalive: true }).catch(() => {})
       if (peerRef.current === pc) peerRef.current = null
       if (current()) {
         sessionRef.current = ''
@@ -245,7 +246,7 @@ export default function AdminScriptedDemo({ onExit }) {
   }, [appendLog, beginAvatarLoading, markChain])
 
   const isSpeaking = useCallback(async () => {
-    const response = await fetch(`${LIVETALKING_BASE}/is_speaking`, {
+    const response = await avatarFetch(`${LIVETALKING_BASE}/is_speaking`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ sessionid: sessionRef.current }),
@@ -279,7 +280,7 @@ export default function AdminScriptedDemo({ onExit }) {
     try {
       const sessionid = await connect()
       if (runRef.current !== runId) return
-      const response = await fetch(`${LIVETALKING_BASE}/human`, {
+      const response = await avatarFetch(`${LIVETALKING_BASE}/human`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text, type: 'echo', interrupt: true, sessionid }),

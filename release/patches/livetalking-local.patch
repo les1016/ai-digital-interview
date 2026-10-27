@@ -1,5 +1,5 @@
 diff --git a/app.py b/app.py
-index 1f9a888..c822fbf 100644
+index 1f9a888..13c47c0 100644
 --- a/app.py
 +++ b/app.py
 @@ -54,6 +54,7 @@ from utils.logger import logger
@@ -20,7 +20,15 @@ index 1f9a888..c822fbf 100644
  
  def main():
      global rtc_manager, opt, model,load_avatar
-@@ -174,6 +178,7 @@ def main():
+@@ -168,12 +172,14 @@ def main():
+             logger.info("[VirtualCam] Virtual camera output enabled - digital human will be rendered to virtual camera")
+ 
+     #############################################################################
+-    appasync = web.Application(client_max_size=1024**2*100)
++    from server.routes import avatar_access_control
++    appasync = web.Application(client_max_size=1024**2*100, middlewares=[avatar_access_control])
+     appasync["llm_response"] = llm_response
+     appasync["opt"] = opt
      appasync["rtc_manager"] = rtc_manager
  
      appasync.on_shutdown.append(on_shutdown)
@@ -28,7 +36,7 @@ index 1f9a888..c822fbf 100644
      appasync.router.add_post("/offer", offer)
      appasync.router.add_get("/record/{sessionid}", download_record)
      
-@@ -181,13 +186,26 @@ def main():
+@@ -181,13 +187,26 @@ def main():
      setup_routes(appasync) 
  
      # Configure default CORS settings.
@@ -61,7 +69,7 @@ index 1f9a888..c822fbf 100644
      # Configure CORS on all routes.
      for route in list(appasync.router.routes()):
          cors.add(route)
-@@ -203,7 +221,7 @@ def main():
+@@ -203,7 +222,7 @@ def main():
          loop = asyncio.new_event_loop()
          asyncio.set_event_loop(loop)
          loop.run_until_complete(runner.setup())
@@ -70,7 +78,7 @@ index 1f9a888..c822fbf 100644
          loop.run_until_complete(site.start())
          if opt.transport=='rtcpush':
              for k in range(opt.max_session):
-@@ -227,7 +245,8 @@ def main():
+@@ -227,7 +246,8 @@ def main():
  # os.environ['MULTIPROCESSING_METHOD'] = 'forkserver'                                                    
  if __name__ == '__main__':
      mp.set_start_method('spawn')
@@ -277,18 +285,20 @@ index e69c72e..18ca4a7 100644
          return combine_frame
 -
 diff --git a/server/asr_server.py b/server/asr_server.py
-index 0cd84fa..7f1ec23 100644
+index 0cd84fa..662b99e 100644
 --- a/server/asr_server.py
 +++ b/server/asr_server.py
-@@ -16,6 +16,7 @@ import json
+@@ -16,7 +16,9 @@ import json
  import time
  import io
  import asyncio
 +import os
  import threading
++from pathlib import Path
  import numpy as np
  from aiohttp import web
-@@ -27,7 +28,10 @@ from utils.logger import logger
+ 
+@@ -27,7 +29,10 @@ from utils.logger import logger
  
  _sensevoice_model = None
  _sensevoice_load_lock = threading.Lock()
@@ -300,7 +310,31 @@ index 0cd84fa..7f1ec23 100644
  
  
  def _load_sensevoice():
-@@ -89,7 +93,8 @@ def _run_inference(audio_float32: np.ndarray, sample_rate: int, use_itn: bool):
+@@ -53,12 +58,21 @@ def _load_sensevoice():
+         )
+ 
+         t0 = time.perf_counter()
++        cache = Path(os.getenv("MODELSCOPE_CACHE", str(Path.home() / ".cache/modelscope"))) / "models"
++        def model_location(name, setting):
++            configured = os.getenv(setting, "").strip()
++            if configured:
++                return configured
++            cached = cache / ("iic--" + name) / "snapshots/master"
++            return str(cached) if (cached / "model.pt").is_file() else "iic/" + name
++
+         _sensevoice_model = AutoModel(
+-            model="iic/SenseVoiceSmall",
+-            vad_model="fsmn-vad",
++            model=model_location("SenseVoiceSmall", "SENSEVOICE_MODEL_DIR"),
++            vad_model=model_location("speech_fsmn_vad_zh-cn-16k-common-pytorch", "SENSEVOICE_VAD_DIR"),
+             vad_kwargs={"max_single_segment_time": 30000},
+             device=device,
+             trust_remote_code=True,
++            disable_update=True,
+         )
+         elapsed = time.perf_counter() - t0
+         logger.info(
+@@ -89,7 +103,8 @@ def _run_inference(audio_float32: np.ndarray, sample_rate: int, use_itn: bool):
      wav_buf.seek(0)
  
      t0 = time.perf_counter()
@@ -310,7 +344,7 @@ index 0cd84fa..7f1ec23 100644
          res = model.generate(
              input=wav_buf,
              cache={},
-@@ -97,6 +102,8 @@ def _run_inference(audio_float32: np.ndarray, sample_rate: int, use_itn: bool):
+@@ -97,6 +112,8 @@ def _run_inference(audio_float32: np.ndarray, sample_rate: int, use_itn: bool):
              use_itn=use_itn,
              batch_size_s=60,
          )
@@ -319,7 +353,7 @@ index 0cd84fa..7f1ec23 100644
      inference_ms = (time.perf_counter() - t0) * 1000
  
      text = ""
-@@ -119,6 +126,13 @@ def _run_inference(audio_float32: np.ndarray, sample_rate: int, use_itn: bool):
+@@ -119,6 +136,13 @@ def _run_inference(audio_float32: np.ndarray, sample_rate: int, use_itn: bool):
  # ─── WebSocket Handler ─────────────────────────────────────────────────────
  
  SAMPLE_RATE = 16000  # The browser client records at 16 kHz mono PCM16
@@ -333,18 +367,20 @@ index 0cd84fa..7f1ec23 100644
  
  
  async def asr_websocket_handler(request):
-@@ -143,6 +157,10 @@ async def asr_websocket_handler(request):
+@@ -143,7 +167,11 @@ async def asr_websocket_handler(request):
             {"text":"hello world", "mode":"2pass-offline",
              "is_final":true, "timestamp":null}
      """
+-    ws = web.WebSocketResponse()
 +    origin = request.headers.get("Origin")
 +    if origin and origin not in ALLOWED_BROWSER_ORIGINS:
 +        raise web.HTTPForbidden(text="Browser origin is not allowed")
 +
-     ws = web.WebSocketResponse()
++    ws = web.WebSocketResponse(protocols=("asr",))
      await ws.prepare(request)
  
-@@ -211,6 +229,22 @@ async def asr_websocket_handler(request):
+     client_ip = request.remote
+@@ -211,6 +239,22 @@ async def asr_websocket_handler(request):
                      audio_float32 = audio_int16.astype(np.float32) / 32768.0
                      use_itn = config.get("itn", False)
  
@@ -367,16 +403,24 @@ index 0cd84fa..7f1ec23 100644
                      # Offload blocking inference to a thread
                      loop = asyncio.get_event_loop()
                      try:
-@@ -224,6 +258,8 @@ async def asr_websocket_handler(request):
+@@ -222,8 +266,14 @@ async def asr_websocket_handler(request):
+                             use_itn,
+                         )
                      except Exception as e:
-                         logger.exception(f"[ASR] ❌ Inference failed: {e}")
-                         text = ""
+-                        logger.exception(f"[ASR] ❌ Inference failed: {e}")
+-                        text = ""
++                        logger.warning("[ASR] Inference failed: %s", type(e).__name__)
++                        await ws.send_str(json.dumps({
++                            "text": "", "is_final": True, "error": "asr_unavailable", "retryable": True,
++                            "message": "语音识别服务暂不可用，本次不计为无效回答，请稍后重试。",
++                        }, ensure_ascii=False))
++                        continue
 +                    finally:
 +                        _sensevoice_queue_slots.release()
  
                      # Map the client mode to the response mode the frontend expects
                      mode = config.get("mode", "offline")
-@@ -241,6 +277,10 @@ async def asr_websocket_handler(request):
+@@ -241,6 +291,10 @@ async def asr_websocket_handler(request):
                      logger.info(f"[ASR] 📤 Result sent to client (mode={response_mode})")
  
              elif msg.type == web.WSMsgType.BINARY:
@@ -388,10 +432,120 @@ index 0cd84fa..7f1ec23 100644
                  chunks_received += 1
  
 diff --git a/server/routes.py b/server/routes.py
-index af92091..4b8902b 100644
+index af92091..30a8cf4 100644
 --- a/server/routes.py
 +++ b/server/routes.py
-@@ -149,6 +149,23 @@ async def is_speaking(request):
+@@ -9,6 +9,109 @@ from aiohttp import web
+ from utils.logger import logger
+ 
+ 
++def local_avatar_identity(token):
++    """Verify a two-minute avatar ticket without sharing a live SQLite DB."""
++    import os
++    from pathlib import Path
++    import jwt
++    from dotenv import dotenv_values
++    root = Path(os.environ["INTERVIEW_PROJECT_ROOT"]).resolve()
++    config = dotenv_values(root / ".env")
++    setting = lambda name, default="": os.getenv(name, config.get(name) or default)
++    if setting("APP_ENV", "development") != "development":
++        raise RuntimeError("Local avatar verification is development-only")
++    secret = setting("JWT_SECRET").strip()
++    if not secret or secret == "replace-with-a-long-random-local-secret":
++        secret = (root / "data/.jwt_secret").read_text(encoding="utf-8").strip()
++    if len(secret) < 32:
++        raise RuntimeError("Invalid local signing configuration")
++    try:
++        claims = jwt.decode(token, secret, algorithms=["HS256"], options={"require": ["exp", "sub", "iat"]})
++        if claims.get("purpose") != "avatar" or claims.get("role") not in {"student", "admin"}:
++            raise ValueError("Not an avatar ticket")
++        if claims["exp"] - claims["iat"] > 120:
++            raise ValueError("Avatar ticket lifetime exceeded")
++        return {"id": int(claims["sub"]), "role": claims["role"]}
++    except (jwt.PyJWTError, ValueError, TypeError):
++        raise web.HTTPUnauthorized()
++
++
++# All model-control routes share the application's identity boundary.
++async def authenticated_avatar_user(request):
++    from aiohttp import ClientSession, ClientTimeout
++    import os
++    authorization = request.headers.get("Authorization", "")
++    if request.path == "/api/asr" and not authorization:
++        protocols = request.headers.get("Sec-WebSocket-Protocol", "").split(",")
++        token = next((p.strip()[5:] for p in protocols if p.strip().startswith("auth.")), "")
++        if token:
++            authorization = "Bearer " + token
++    if not authorization.startswith("Bearer "):
++        raise web.HTTPUnauthorized()
++    if os.getenv("INTERVIEW_AUTH_MODE") == "local-ticket":
++        try:
++            return await asyncio.to_thread(local_avatar_identity, authorization[7:])
++        except web.HTTPException:
++            raise
++        except Exception:
++            raise web.HTTPServiceUnavailable()
++    endpoint = os.getenv("INTERVIEW_AUTH_URL", "http://127.0.0.1:8000/api/avatar/identity")
++    try:
++        async with ClientSession(timeout=ClientTimeout(total=5)) as client:
++            async with client.get(endpoint, headers={"Authorization": authorization}, allow_redirects=False) as response:
++                if response.status == 401:
++                    raise web.HTTPUnauthorized()
++                if response.status != 200:
++                    raise web.HTTPServiceUnavailable()
++                user = await response.json()
++        if not isinstance(user.get("id"), int) or user.get("role") not in {"student", "admin"}:
++            raise web.HTTPUnauthorized()
++        return user
++    except web.HTTPException:
++        raise
++    except Exception:
++        raise web.HTTPServiceUnavailable()
++
++
++@web.middleware
++async def avatar_access_control(request, handler):
++    if request.path == "/healthz" or request.method == "OPTIONS":
++        return await handler(request)
++    user = await authenticated_avatar_user(request)
++    admin = user["role"] == "admin"
++    controls = {"/human", "/is_speaking", "/interrupt_talk", "/api/session/close"}
++    public_routes = controls | {"/offer", "/api/asr"}
++    if not admin and request.path not in public_routes:
++        raise web.HTTPForbidden()
++    if request.path in controls or request.path == "/offer":
++        if request.method != "POST":
++            raise web.HTTPMethodNotAllowed(request.method, ["POST"])
++        try:
++            params = await request.json()
++            if not isinstance(params, dict):
++                raise ValueError()
++        except Exception:
++            raise web.HTTPBadRequest()
++        if not admin and request.path == "/offer" and set(params) - {"sdp", "type"}:
++            raise web.HTTPForbidden()
++        if not admin and request.path == "/human" and params.get("type") != "echo":
++            raise web.HTTPForbidden()
++        if request.path in controls:
++            session = get_session(request, str(params.get("sessionid", "")))
++            if session is None:
++                raise web.HTTPNotFound()
++            if not admin and getattr(session, "interview_owner_id", None) != user["id"]:
++                raise web.HTTPForbidden()
++    response = await handler(request)
++    if request.path == "/offer" and response.status == 200:
++        payload = json.loads(response.text)
++        if payload.get("sessionid"):
++            session = get_session(request, str(payload["sessionid"]))
++            if session is not None:
++                session.interview_owner_id = user["id"]
++    return response
++
++
+ # ─── 路由工具函数 ──────────────────────────────────────────────────────────
+ 
+ def json_ok(data=None):
+@@ -149,6 +252,23 @@ async def is_speaking(request):
          return json_error("session not found")
      return json_ok(data=avatar_session.is_speaking())
  
@@ -415,7 +569,7 @@ index af92091..4b8902b 100644
  async def sse_handler(request):
      """SSE 事件流，推送服务器状态更新到客户端"""
      sessionid = request.query.get('sessionid', '')
-@@ -238,6 +255,7 @@ def setup_routes(app):
+@@ -238,6 +358,7 @@ def setup_routes(app):
      app.router.add_post("/record", record)
      app.router.add_post("/interrupt_talk", interrupt_talk)
      app.router.add_post("/is_speaking", is_speaking)

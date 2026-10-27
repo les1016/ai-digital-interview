@@ -11,7 +11,7 @@ import httpx
 import jwt
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, func, select
+from sqlalchemy import create_engine, event, func, select
 from sqlalchemy.orm import sessionmaker
 
 from apps.server.app import main
@@ -64,6 +64,7 @@ class ApiRegressionTests(unittest.TestCase):
             f"sqlite:///{cls.temp_path / 'test.db'}",
             connect_args={"check_same_thread": False},
         )
+        event.listen(cls.engine, "connect", lambda connection, _: connection.execute("PRAGMA foreign_keys=ON"))
         cls.Session = sessionmaker(bind=cls.engine, autoflush=False, expire_on_commit=False)
         cls.engine_patch = patch.object(main, "engine", cls.engine)
         cls.session_patch = patch.object(main, "SessionLocal", cls.Session)
@@ -144,6 +145,61 @@ class ApiRegressionTests(unittest.TestCase):
             })
         self.assertEqual(response.status_code, 200, response.text)
         return response.json()["id"]
+
+    def test_avatar_tickets_are_short_lived_and_not_login_tokens(self):
+        body, headers = self.register()
+        response = self.client.post("/api/avatar/token", headers=headers)
+        self.assertEqual(response.status_code, 200)
+        token = response.json()["token"]
+        avatar_headers = {"Authorization": f"Bearer {token}"}
+        self.assertEqual(self.client.get("/api/avatar/identity", headers=avatar_headers).status_code, 200)
+        self.assertEqual(self.client.get("/api/me", headers=avatar_headers).status_code, 401)
+        self.assertEqual(self.client.get("/api/avatar/identity", headers=headers).status_code, 401)
+        self.assertEqual(self.client.post("/api/avatar/token").status_code, 401)
+        claims = jwt.decode(token, main.JWT_SECRET, algorithms=[main.ALGORITHM])
+        self.assertEqual(claims["exp"] - claims["iat"], 120)
+
+    def test_interruption_token_cannot_authenticate(self):
+        body, headers = self.register()
+        token = main.interruption_session_payload(body["user"]["id"], 1)["interruption_session_token"]
+        self.assertEqual(self.client.get("/api/me", headers={"Authorization": f"Bearer {token}"}).status_code, 401)
+        self.assertEqual(self.client.get("/api/me", headers=headers).status_code, 200)
+
+    def test_registration_limit_aggregates_new_usernames(self):
+        with patch.object(main, "AUTH_REGISTER_MAX_ATTEMPTS", 2):
+            statuses = [self.client.post("/api/auth/register", json={
+                "username": f"bulkuser{i}", "password": "test-password", "display_name": "Test",
+            }).status_code for i in range(5)]
+        self.assertEqual(statuses, [200, 200, 429, 429, 429])
+
+    def test_delete_interrupted_interview_preserves_cooldown(self):
+        body, headers = self.register()
+        iid = self.start_interview(headers, self.create_resume(headers))
+        for _ in range(main.FORCED_EXIT_THRESHOLD):
+            session = main.interruption_session_payload(body["user"]["id"], iid)
+            response = self.client.post(f"/api/interviews/{iid}/interruptions", headers=headers, json={
+                "session_id": session["interruption_session_id"],
+                "session_token": session["interruption_session_token"], "reason": "page_unload",
+            })
+            self.assertEqual(response.status_code, 200)
+        response = self.client.delete(f"/api/interviews/{iid}", headers=headers)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(self.client.get(f"/api/interviews/{iid}", headers=headers).status_code, 404)
+        status = self.client.get("/api/account/interruption-status", headers=headers).json()
+        self.assertEqual(status["forced_exit_count"], main.FORCED_EXIT_THRESHOLD)
+        self.assertGreater(status["cooldown_remaining_seconds"], 0)
+
+    def test_operation_lock_old_reference_remains_exclusive(self):
+        first = main.operation_lock("race")
+        self.assertTrue(first.acquire(False))
+        waiting = main.operation_lock("race")
+        main.release_operation_lock("race", first)
+        fresh = main.operation_lock("race")
+        self.assertTrue(waiting.acquire(False))
+        try:
+            self.assertFalse(fresh.acquire(False))
+        finally:
+            waiting.release()
 
     def test_auth_requires_expiring_token_and_rejects_duplicates(self):
         body, headers = self.register()
@@ -652,6 +708,9 @@ class ApiRegressionTests(unittest.TestCase):
         self.assertEqual(repeated.json()["report_id"], report.json()["report_id"])
         self.assertEqual(model.call_count, 1)
         self.assertEqual(set(main.CORE_REPORT_DIMENSIONS).difference(report.json()["dimensions"]), set())
+        self.assertEqual(report.json()["generation_status"], "repaired")
+        self.assertTrue(report.json()["generation_notice"])
+        self.assertIn("模型报告结构异常", report.json()["disclaimer"])
         self.assertIn("样本较少", report.json()["summary"])
         self.assertTrue(report.json()["action_plan"])
 

@@ -25,6 +25,18 @@ class LocalCoordinationTests(unittest.TestCase):
         self.assertTrue(lock.acquire(blocking=False))
         lock.release()
 
+    def test_independent_same_name_budget_locks_exclude_each_other(self):
+        coordinator = Coordinator()
+        first = coordinator.lock("api-budget")
+        second = coordinator.lock("api-budget")
+        self.assertTrue(first.acquire(False))
+        try:
+            self.assertFalse(second.acquire(False))
+        finally:
+            first.release()
+        self.assertTrue(second.acquire(False))
+        second.release()
+
     def test_local_semaphore_rejects_overload(self):
         semaphore = Coordinator().semaphore("document", 2)
         self.assertTrue(semaphore.acquire(blocking=False))

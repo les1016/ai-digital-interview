@@ -173,7 +173,7 @@ if ($cosyConfigured -and -not (Test-Port 50000)) {
     $pathPart = $ProjectRoot.Substring(2).Replace("\", "/")
     $wslCosyScript = "/mnt/$drive$pathPart/scripts/start-cosyvoice.sh"
     $cosy = Start-Process -FilePath "$env:WINDIR\System32\wsl.exe" `
-        -ArgumentList (ConvertTo-NativeArguments @('-d', $WslDistro, '--', 'bash', $wslCosyScript)) `
+        -ArgumentList (ConvertTo-WslArguments $WslDistro $wslCosyScript) `
         -WorkingDirectory $ProjectRoot -WindowStyle Hidden -PassThru `
         -RedirectStandardOutput (Join-Path $LogDir "cosyvoice-launch.log") `
         -RedirectStandardError (Join-Path $LogDir "cosyvoice-launch-error.log")
@@ -187,7 +187,7 @@ if (-not $WebOnly -and -not (Test-Port 8010)) {
     $pathPart = $ProjectRoot.Substring(2).Replace("\", "/")
     $wslScript = "/mnt/$drive$pathPart/scripts/start-livetalking.sh"
     $avatar = Start-Process -FilePath "$env:WINDIR\System32\wsl.exe" `
-        -ArgumentList (ConvertTo-NativeArguments @('-d', $WslDistro, '--', 'bash', $wslScript)) `
+        -ArgumentList (ConvertTo-WslArguments $WslDistro $wslScript) `
         -WorkingDirectory $ProjectRoot -WindowStyle Hidden -PassThru `
         -RedirectStandardOutput (Join-Path $LogDir "livetalking-launch.log") `
         -RedirectStandardError (Join-Path $LogDir "livetalking-launch-error.log")

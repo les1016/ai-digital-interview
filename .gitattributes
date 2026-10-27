@@ -1,0 +1,5 @@
+*.sh text eol=lf
+*.patch text eol=lf
+
+# Patch context uses a required prefix space even on otherwise blank lines.
+*.patch whitespace=-blank-at-eol

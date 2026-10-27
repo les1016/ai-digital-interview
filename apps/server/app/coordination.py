@@ -5,6 +5,7 @@ import os
 import secrets
 import threading
 import time
+import weakref
 from typing import Any
 
 
@@ -192,6 +193,8 @@ class Coordinator:
         self._client: Any | None = None
         self._local_windows: dict[str, deque[float]] = defaultdict(deque)
         self._local_windows_lock = threading.Lock()
+        self._locks = weakref.WeakValueDictionary()
+        self._locks_guard = threading.Lock()
         if redis_url:
             try:
                 import redis
@@ -225,7 +228,13 @@ class Coordinator:
         return self._client is None or bool(self._client.ping())
 
     def lock(self, name: str, lease_seconds: int = 180) -> LeaseLock:
-        return LeaseLock(self._client, self._key("lock", name), lease_seconds)
+        with self._locks_guard:
+            key = self._key("lock", name)
+            lock = self._locks.get(key)
+            if lock is None:
+                lock = LeaseLock(self._client, key, lease_seconds)
+                self._locks[key] = lock
+            return lock
 
     def semaphore(self, name: str, limit: int, lease_seconds: int = 180) -> LeaseSemaphore:
         return LeaseSemaphore(

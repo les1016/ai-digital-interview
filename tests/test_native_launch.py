@@ -62,6 +62,29 @@ if (Test-ManagedCommandLine 'D:\sample\other.js build' 'vite.js preview') { thro
             self.assertEqual(result.returncode, 0, result.stderr.decode(errors="replace"))
             self.assertEqual(json.loads((root / "argv.json").read_text(encoding="utf-8-sig")), arguments)
 
+    @unittest.skipUnless(shutil.which("wsl.exe"), "Requires WSL")
+    def test_wsl_script_launch_preserves_options_and_unicode_path(self):
+        result = subprocess.run(["wsl.exe", "--list", "--quiet"], capture_output=True, timeout=20)
+        if "Ubuntu-22.04" not in result.stdout.decode("utf-16-le", errors="ignore"):
+            self.skipTest("Requires Ubuntu-22.04")
+        with tempfile.TemporaryDirectory(prefix="wsl launch 中文 ") as directory:
+            root = Path(directory)
+            shell = root / "probe.sh"
+            shell.write_text("#!/bin/bash\nset -euo pipefail\nprintf 'wsl-probe-ok'\n", encoding="utf-8", newline="\n")
+            linux_path = "/mnt/" + str(shell)[0].lower() + str(shell)[2:].replace("\\", "/")
+            shutil.copyfile(ROOT / "scripts/process-arguments.ps1", root / "process-arguments.ps1")
+            script = root / "probe.ps1"
+            script.write_text('''param([string]$LinuxPath)
+. (Join-Path $PSScriptRoot 'process-arguments.ps1')
+$p = Start-Process wsl.exe -ArgumentList (ConvertTo-WslArguments 'Ubuntu-22.04' $LinuxPath) -WindowStyle Hidden -PassThru -Wait -RedirectStandardOutput (Join-Path $PSScriptRoot 'result.txt') -RedirectStandardError (Join-Path $PSScriptRoot 'error.txt')
+exit $p.ExitCode
+''', encoding="utf-8-sig")
+            result = subprocess.run(["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script), "-LinuxPath", linux_path], capture_output=True, timeout=30)
+            self.assertEqual(result.returncode, 0, (root / "error.txt").read_text(errors="replace"))
+            self.assertIn("wsl-probe-ok", (root / "result.txt").read_text(errors="replace"))
+        for name in ("start-livetalking.sh", "start-cosyvoice.sh"):
+            self.assertNotIn(b"\r\n", (ROOT / "scripts" / name).read_bytes())
+
     def test_other_project_port_is_refused_without_killing_any_process(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

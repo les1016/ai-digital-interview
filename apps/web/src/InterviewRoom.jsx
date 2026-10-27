@@ -1,3 +1,4 @@
+import { avatarFetch, avatarSocket } from './api'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import './answerCorrections.css'
 import {
@@ -208,6 +209,7 @@ export function ReportView({ report, messages = [], interviewId = null, onExit }
         </div>
       </article>}
     </div>
+    {report.generation_notice && <p className="form-error notice" role="status">{report.generation_notice}</p>}
     {report._local_warning && <p className="form-error notice">{report._local_warning}</p>}
     <p className="report-disclaimer">{report.disclaimer}</p>
     <div className="report-actions">
@@ -333,7 +335,7 @@ export default function InterviewRoom({ resume, existingInterview = null, mediaS
     window.speechSynthesis?.cancel()
     const avatarSessionId = sessionRef.current
     if (avatarSessionId) {
-      fetch(`${LIVETALKING_BASE}/api/session/close`, {
+      avatarFetch(`${LIVETALKING_BASE}/api/session/close`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ sessionid: avatarSessionId }),
@@ -385,7 +387,7 @@ export default function InterviewRoom({ resume, existingInterview = null, mediaS
     const warnBeforeUnload = event => {
       const avatarSessionId = sessionRef.current
       if (avatarSessionId) {
-        fetch(`${LIVETALKING_BASE}/api/session/close`, {
+        avatarFetch(`${LIVETALKING_BASE}/api/session/close`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ sessionid: avatarSessionId }),
@@ -531,7 +533,7 @@ export default function InterviewRoom({ resume, existingInterview = null, mediaS
           pc.addEventListener('icegatheringstatechange', listener)
         })
       }
-      const response = await fetch(`${LIVETALKING_BASE}/offer`, {
+      const response = await avatarFetch(`${LIVETALKING_BASE}/offer`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -562,7 +564,7 @@ export default function InterviewRoom({ resume, existingInterview = null, mediaS
   }, [connectAvatar])
 
   const avatarIsSpeaking = useCallback(async () => {
-    const response = await fetch(`${LIVETALKING_BASE}/is_speaking`, {
+    const response = await avatarFetch(`${LIVETALKING_BASE}/is_speaking`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ sessionid: sessionRef.current }),
@@ -586,7 +588,8 @@ export default function InterviewRoom({ resume, existingInterview = null, mediaS
         await sleep(250)
       }
 
-      if (!started || speechTurnRef.current !== turnId) return
+      if (speechTurnRef.current !== turnId) return
+      if (!started) throw new Error('数字人未输出语音')
 
       const finishDeadline = Date.now() + Math.max(180000, text.length * 1000)
       let quietSince = 0
@@ -657,7 +660,7 @@ export default function InterviewRoom({ resume, existingInterview = null, mediaS
     try {
       if (!sessionRef.current) await connectAvatar()
       if (speechTurnRef.current !== turnId) return
-      const response = await fetch(`${LIVETALKING_BASE}/human`, {
+      const response = await avatarFetch(`${LIVETALKING_BASE}/human`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text: spokenText, type: 'echo', interrupt: true, sessionid: sessionRef.current }),
@@ -1171,7 +1174,15 @@ export default function InterviewRoom({ resume, existingInterview = null, mediaS
 
     const socketUrl = new URL(`${LIVETALKING_BASE}/api/asr`)
     socketUrl.protocol = socketUrl.protocol === 'https:' ? 'wss:' : 'ws:'
-    const socket = new WebSocket(socketUrl)
+    let socket
+    try {
+      socket = await avatarSocket(socketUrl)
+    } catch (reason) {
+      setError(reason.message)
+      setPhase('ready')
+      return
+    }
+    if (operationGenerationRef.current !== operationGeneration) { socket.close(); return }
     socket.binaryType = 'arraybuffer'
     asrSocketRef.current = socket
 

@@ -9,6 +9,12 @@ function ConvertTo-NativeArguments([AllowEmptyCollection()][string[]]$Values) {
     return ($quoted -join ' ')
 }
 
+# WSL parses quoted option names as a Linux command instead of Windows options.
+function ConvertTo-WslArguments([string]$Distro, [string]$Script) {
+    if ($Distro -notmatch '^[A-Za-z0-9_.-]+$') { throw 'Invalid WSL distribution name' }
+    return "-d $Distro -- bash " + (ConvertTo-NativeArguments @($Script))
+}
+
 function Test-ManagedCommandLine([string]$CommandLine, [string]$Marker) {
     # Accept both legacy unquoted arguments and new quoted native arguments.
     if (-not $CommandLine -or -not $Marker) { return $false }

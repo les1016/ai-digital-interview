@@ -16,6 +16,22 @@ class PublicReleaseTests(unittest.TestCase):
             self.assertTrue(release.inspect_bytes("docs/images/unreviewed.png", blob))
             self.assertTrue(release.inspect_bytes(name.upper(), blob))
 
+    def test_export_manifest_hashes_canonical_lf_text(self):
+        import hashlib
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder) / "source"
+            (root / "release").mkdir(parents=True)
+            (root / "main.py").write_bytes(b"print('ok')\r\n")
+            (root / "release/public-files.json").write_text(json.dumps([
+                {"source": "main.py", "target": "main.py"}
+            ]))
+            destination = Path(folder) / "public"
+            self.assertTrue(release.export(root, destination)["ok"])
+            content = (destination / "main.py").read_bytes()
+            self.assertEqual(content, b"print('ok')\n")
+            manifest = json.loads((destination / "PUBLIC_RELEASE_MANIFEST.json").read_text())
+            self.assertEqual(manifest["sha256"]["main.py"], hashlib.sha256(content).hexdigest())
+
     def test_nonexistent_scan_root_never_passes(self):
         with tempfile.TemporaryDirectory() as folder:
             self.assertFalse(release.check_tree(Path(folder) / "does-not-exist")["ok"])

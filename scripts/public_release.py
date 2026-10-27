@@ -169,7 +169,9 @@ def collect(root: Path) -> dict[str, bytes]:
             path = safe_path(root, "release/patches/" + name)
             if path.exists():
                 files["release/patches/" + name] = path.read_bytes()
-    return files
+    # Git normalizes text line endings on commit; hash the same bytes users clone.
+    return {name: blob if name in REVIEWED_PREVIEWS else blob.replace(b"\r\n", b"\n")
+            for name, blob in files.items()}
 
 
 def validate(files: dict[str, bytes], known_private=()) -> list[dict]:

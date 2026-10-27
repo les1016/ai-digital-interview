@@ -27,7 +27,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 from pypdf import PdfReader
-from sqlalchemy import DateTime, ForeignKey, String, Text, UniqueConstraint, case, create_engine, delete, event, func, inspect, or_, select
+from sqlalchemy import DateTime, ForeignKey, String, Text, UniqueConstraint, case, create_engine, delete, event, func, inspect, or_, select, union_all
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship, sessionmaker
 from starlette.concurrency import run_in_threadpool
@@ -358,6 +358,13 @@ class InterviewInterruption(Base):
     reason: Mapped[str] = mapped_column(String(32))
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow_naive, index=True)
 
+class DeletedInterviewInterruption(Base):
+    __tablename__ = "deleted_interview_interruptions"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+
+
 class CleanPayload(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
@@ -465,6 +472,8 @@ class ConversationSummary(CleanPayload):
     follow_up_focus: list[str] = Field(default_factory=list, max_length=10)
 
 class ReportPayload(CleanPayload):
+    generation_status: Literal["model", "repaired"] = "model"
+    generation_notice: str = Field(default="", max_length=1000)
     overall_score: int = Field(ge=0, le=100)
     summary: str = Field(min_length=1, max_length=5_000)
     highlights: list[str] = Field(min_length=1, max_length=10)
@@ -549,22 +558,14 @@ def persist_out_of_band_event(**event_data) -> None:
 def interruption_status(user_id: int, db: Session) -> dict:
     now = utcnow_naive()
     cutoff = now - timedelta(seconds=FORCED_EXIT_WINDOW_SECONDS)
-    filters = (
-        InterviewInterruption.user_id == user_id,
-        InterviewInterruption.created_at >= cutoff,
-    )
-    recent_count = db.scalar(
-        select(func.count()).select_from(InterviewInterruption)
-        .where(
-            *filters,
-        )
-    ) or 0
-    latest_created_at = db.scalar(
-        select(InterviewInterruption.created_at)
-        .where(*filters)
-        .order_by(InterviewInterruption.created_at.desc())
-        .limit(1)
-    )
+    recent = union_all(*[
+        select(table.created_at.label("created_at")).where(
+            table.user_id == user_id, table.created_at >= cutoff
+        ) for table in (InterviewInterruption, DeletedInterviewInterruption)
+    ]).subquery()
+    recent_count, latest_created_at = db.execute(
+        select(func.count(), func.max(recent.c.created_at)).select_from(recent)
+    ).one()
     cooldown_until = None
     if recent_count >= FORCED_EXIT_THRESHOLD and latest_created_at:
         cooldown_until = latest_created_at + timedelta(seconds=FORCED_EXIT_COOLDOWN_SECONDS)
@@ -613,12 +614,12 @@ def validate_interruption_session(payload: InterviewInterruptionPayload, user_id
 
 def token_for(user: User) -> str:
     expires = datetime.now(timezone.utc) + timedelta(days=7)
-    return jwt.encode({"sub": str(user.id), "role": user.role, "exp": expires}, JWT_SECRET, algorithm=ALGORITHM)
+    return jwt.encode({"sub": str(user.id), "role": user.role, "purpose": "access", "exp": expires}, JWT_SECRET, algorithm=ALGORITHM)
 
 def rate_limit_auth(request: Request, *, action: str, username: str, max_attempts: int) -> None:
     """Limit authentication attempts locally or across workers through Redis."""
     client_host = request.client.host if request.client else "unknown"
-    normalized_username = username.strip().lower()[:64]
+    normalized_username = "*" if action == "register" else username.strip().lower()[:64]
     key = f"{action}:{client_host}:{normalized_username}"
     if coordinator.distributed:
         if not coordinator.rate_limit(f"auth:{key}", max_attempts, AUTH_RATE_LIMIT_WINDOW_SECONDS):
@@ -636,7 +637,7 @@ def rate_limit_auth(request: Request, *, action: str, username: str, max_attempt
 
 def clear_auth_rate_limit(request: Request, *, action: str, username: str) -> None:
     client_host = request.client.host if request.client else "unknown"
-    normalized_username = username.strip().lower()[:64]
+    normalized_username = "*" if action == "register" else username.strip().lower()[:64]
     key = f"{action}:{client_host}:{normalized_username}"
     if coordinator.distributed:
         coordinator.clear_rate_limit(f"auth:{key}")
@@ -674,6 +675,8 @@ def current_user(credentials: HTTPAuthorizationCredentials | None = Depends(secu
             algorithms=[ALGORITHM],
             options={"require": ["exp", "sub"]},
         )
+        if claims.get("purpose") != "access":
+            raise ValueError("Not an access token")
         user_id = int(claims["sub"])
     except Exception as exc: raise HTTPException(401, "登录状态已失效") from exc
     user = db.get(User, user_id)
@@ -1847,6 +1850,9 @@ def resilient_report_payload(
         job_description=job_description,
         answer_count=answer_count,
     )
+    normalized["generation_status"] = "repaired"
+    normalized["generation_notice"] = "模型报告结构异常，本页含本地规则补全的复盘；分数不代表模型的完整测评。"
+    normalized["disclaimer"] = normalized["generation_notice"] + " " + normalized.get("disclaimer", "")[:1800]
     return ReportPayload.model_validate(normalized).model_dump()
 
 def interview_document_payload(document: InterviewDocument) -> dict:
@@ -2244,6 +2250,9 @@ def setup_database():
     ensure_sqlite_compat_schema(engine)
     with SessionLocal() as db:
         reconcile_recording_trash(db)
+        db.execute(delete(DeletedInterviewInterruption).where(
+            DeletedInterviewInterruption.created_at < utcnow_naive() - timedelta(seconds=FORCED_EXIT_WINDOW_SECONDS * 2)
+        ))
         db.execute(delete(InterviewInterruption).where(
             InterviewInterruption.created_at < utcnow_naive() - timedelta(seconds=FORCED_EXIT_WINDOW_SECONDS * 2)
         ))
@@ -2299,7 +2308,6 @@ def register(payload: RegisterPayload, request: Request, db: Session = Depends(g
         db.rollback()
         raise HTTPException(409, "该账号已被使用") from exc
     db.refresh(user)
-    clear_auth_rate_limit(request, action="register", username=payload.username)
     return {"token": token_for(user), "user": {"id": user.id, "name": user.display_name, "role": user.role}}
 
 @app.post("/api/auth/login")
@@ -2309,6 +2317,29 @@ def login(payload: LoginPayload, request: Request, db: Session = Depends(get_db)
     if not user or not verify_password(payload.password, user.password_hash): raise HTTPException(401, "账号或密码错误")
     clear_auth_rate_limit(request, action="login", username=payload.username)
     return {"token": token_for(user), "user": {"id": user.id, "name": user.display_name, "role": user.role}}
+
+@app.post("/api/avatar/token")
+def avatar_ticket(user: User = Depends(current_user)):
+    now = datetime.now(timezone.utc)
+    token = jwt.encode({"sub": str(user.id), "role": user.role, "purpose": "avatar",
+                        "iat": now, "exp": now + timedelta(seconds=120)}, JWT_SECRET, algorithm=ALGORITHM)
+    return {"token": token}
+
+
+@app.get("/api/avatar/identity")
+def avatar_identity(credentials: HTTPAuthorizationCredentials | None = Depends(security), db: Session = Depends(get_db)):
+    try:
+        claims = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[ALGORITHM],
+                            options={"require": ["exp", "sub", "iat"]})
+        if claims.get("purpose") != "avatar" or claims["exp"] - claims["iat"] > 120:
+            raise ValueError("Not an avatar ticket")
+        user = db.get(User, int(claims["sub"]))
+        if user is None:
+            raise ValueError("Unknown user")
+    except (AttributeError, jwt.PyJWTError, ValueError, TypeError):
+        raise HTTPException(401, "数字人会话凭证无效或已过期")
+    return {"id": user.id, "role": user.role}
+
 
 @app.get("/api/me")
 def me(user: User = Depends(current_user)):
@@ -3613,6 +3644,8 @@ def finish_interview(interview_id: int, user: User = Depends(current_user), db: 
         try:
             raw_payload = extract_json_object(raw)
             validated = ReportPayload.model_validate(raw_payload)
+            validated.generation_status = "model"
+            validated.generation_notice = ""
             payload = ensure_conversation_summary(validated.model_dump(), records)
             payload = ensure_target_match(
                 payload,
@@ -3925,6 +3958,15 @@ def delete_interview(interview_id: int, user: User = Depends(current_user), db: 
             raise HTTPException(409, "录像文件正在使用，尚未删除任何面试数据，请稍后重试") from exc
 
         try:
+            interruptions = db.scalars(select(InterviewInterruption).where(
+                InterviewInterruption.interview_id == interview.id
+            )).all()
+            cutoff = utcnow_naive() - timedelta(seconds=FORCED_EXIT_WINDOW_SECONDS)
+            for item in interruptions:
+                if item.created_at >= cutoff:
+                    db.add(DeletedInterviewInterruption(user_id=item.user_id, created_at=item.created_at))
+            db.flush()
+            db.execute(delete(InterviewInterruption).where(InterviewInterruption.interview_id == interview.id))
             db.execute(delete(InterviewAnswerRequest).where(InterviewAnswerRequest.interview_id == interview.id))
             db.execute(delete(InterviewStartRequest).where(InterviewStartRequest.interview_id == interview.id))
             db.execute(delete(InterviewDocument).where(InterviewDocument.interview_id == interview.id))
