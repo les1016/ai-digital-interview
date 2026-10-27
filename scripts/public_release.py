@@ -95,7 +95,8 @@ def inspect_bytes(relative: str, blob: bytes, known_private=()) -> list[dict]:
     for name, pattern in RULES.items():
         for match in pattern.finditer(content):
             issues.append({"path": relative, "rule": name, "line": content.count("\n", 0, match.start()) + 1})
-    if any(value and value in content for value in known_private):
+    decoded_content = re.sub(r"\\u([0-9a-fA-F]{4})", lambda match: chr(int(match[1], 16)), content)
+    if any(value and (value in content or value in decoded_content) for value in known_private):
         issues.append({"path": relative, "rule": "known-local-private-value"})
     return issues
 
@@ -124,9 +125,23 @@ def private_values(root: Path) -> set[str]:
         values.update(value for value in json.loads(markers.read_text(encoding="utf-8")) if isinstance(value, str) and len(value) >= 3)
     demo = safe_path(root, "apps/web/src/data/adminInterviewScript.json")
     if demo.exists() and not (root / "PUBLIC_RELEASE_MANIFEST.json").exists():
-        candidate = json.loads(demo.read_text(encoding="utf-8-sig")).get("candidate")
-        if candidate:
+        private_demo = json.loads(demo.read_text(encoding="utf-8-sig"))
+        candidate = private_demo.get("candidate")
+        if isinstance(candidate, str) and candidate:
             values.add(candidate)
+        # Renaming the candidate does not anonymize education, experience or answers.
+        passages = list(private_demo.get("resume_summary") or [])
+        for turn in private_demo.get("turns") or []:
+            if isinstance(turn, dict):
+                passages.extend([turn.get("answer"), turn.get("answer_summary")])
+        for passage in passages:
+            if not isinstance(passage, str):
+                continue
+            if len(passage.strip()) >= 12:
+                values.add(passage.strip())
+            for fragment in re.split(r"[。；;\n]", passage):
+                if len(fragment.strip()) >= 14:
+                    values.add(fragment.strip())
     return values
 
 
@@ -135,6 +150,8 @@ def load_entries(root: Path) -> list[dict]:
     targets = set()
     for item in entries:
         target = item["target"]
+        if target.casefold() == "apps/web/src/data/admininterviewscript.json" and item["source"] != "release/demo-public.json":
+            raise ReleaseError("private-demo-source-not-allowed")
         safe_path(root, item["source"])
         safe_path(root, target)
         if target.casefold() in targets:

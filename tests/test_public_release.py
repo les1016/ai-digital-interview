@@ -86,8 +86,8 @@ class PublicReleaseTests(unittest.TestCase):
             (root / "api").mkdir()
             key = "sk-" + "private" * 6
             (root / "api/api.txt").write_text(key)
-            (root / "release/demo.json").write_text('{"candidate":"fictional sample"}')
-            (root / "release/public-files.json").write_text(json.dumps([{"source": "release/demo.json", "target": "apps/web/src/data/adminInterviewScript.json"}]))
+            (root / "release/demo-public.json").write_text('{"candidate":"fictional sample"}')
+            (root / "release/public-files.json").write_text(json.dumps([{"source": "release/demo-public.json", "target": "apps/web/src/data/adminInterviewScript.json"}]))
             target = Path(folder) / "public"
             result = release.export(root, target)
             self.assertTrue(result["ok"])
@@ -96,6 +96,38 @@ class PublicReleaseTests(unittest.TestCase):
             self.assertTrue(release.check_tree(target)["ok"])
             with self.assertRaises(release.ReleaseError):
                 release.export(root, target)
+
+    def test_renaming_candidate_does_not_allow_private_resume_or_answers(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder) / "source"
+            private_path = root / "apps/web/src/data/adminInterviewScript.json"
+            private_path.parent.mkdir(parents=True)
+            (root / "release").mkdir()
+            private_resume = "这是仅供本机使用的虚构私密教育履历和实习单位测试段落"
+            private_answer = "这是仅供本机使用的虚构私密模拟回答和个人项目成果测试段落"
+            private_path.write_text(json.dumps({"candidate": "Private Candidate", "resume_summary": [private_resume],
+                                               "turns": [{"answer": private_answer}]}))
+            (root / "release/public-files.json").write_text(json.dumps([
+                {"source": "release/demo-public.json", "target": "apps/web/src/data/adminInterviewScript.json"}
+            ]))
+            for content in [private_resume, private_answer]:
+                with self.subTest(content_kind="resume" if content == private_resume else "answer"):
+                    (root / "release/demo-public.json").write_text(json.dumps({"candidate": "Fictional Sample", "resume_summary": [content]}))
+                    destination = Path(folder) / "public"
+                    result = release.export(root, destination)
+                    self.assertFalse(result["ok"])
+                    self.assertFalse(destination.exists())
+                    self.assertNotIn(content, json.dumps(result))
+
+    def test_release_cannot_reference_private_script_directly(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "release").mkdir()
+            (root / "release/public-files.json").write_text(json.dumps([
+                {"source": "apps/web/src/data/adminInterviewScript.json", "target": "apps/web/src/data/adminInterviewScript.json"}
+            ]))
+            with self.assertRaises(release.ReleaseError):
+                release.collect(root)
 
     def test_failed_scan_creates_no_output(self):
         with tempfile.TemporaryDirectory() as folder:
