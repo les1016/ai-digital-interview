@@ -159,6 +159,11 @@ class ApiRegressionTests(unittest.TestCase):
         claims = jwt.decode(token, main.JWT_SECRET, algorithms=[main.ALGORITHM])
         self.assertEqual(claims["exp"] - claims["iat"], 120)
 
+    def test_private_admin_script_route_uses_real_app_authentication(self):
+        _, headers = self.register()
+        self.assertEqual(self.client.get("/api/admin/demo-script").status_code, 401)
+        self.assertEqual(self.client.get("/api/admin/demo-script", headers=headers).status_code, 403)
+
     def test_interruption_token_cannot_authenticate(self):
         body, headers = self.register()
         token = main.interruption_session_payload(body["user"]["id"], 1)["interruption_session_token"]

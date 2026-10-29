@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_CEILING
 from pathlib import Path
 from collections import defaultdict, deque
+from contextlib import contextmanager
 import errno
 import hashlib
 import json
@@ -33,6 +34,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, rela
 from starlette.concurrency import run_in_threadpool
 
 from .document_conversion import DocumentConversionError, convert_docx_to_pdf
+from .admin_demo import install_admin_demo_routes
 from .document_exports import build_export
 from .coordination import Coordinator, CoordinationUnavailable, LeaseLock
 from .avatar_cues import select_avatar_cue
@@ -502,10 +504,44 @@ def operation_lock(key: str) -> LeaseLock:
         return _operation_locks.setdefault(key, coordinator.lock(key, lease_seconds=180))
 
 def release_operation_lock(key: str, lock: LeaseLock) -> None:
-    lock.release()
-    with _operation_locks_guard:
-        if _operation_locks.get(key) is lock and not lock.locked():
-            _operation_locks.pop(key, None)
+    try:
+        lock.release()
+    finally:
+        with _operation_locks_guard:
+            if _operation_locks.get(key) is lock and not lock.locked():
+                _operation_locks.pop(key, None)
+
+
+@contextmanager
+def operation_capacity(lock_key: str, slots, *, busy_message: str, overload_message: str):
+    """Always release the operation lock, including Redis slot failures."""
+    lock = operation_lock(lock_key)
+    if not lock.acquire(blocking=False):
+        raise HTTPException(409, busy_message)
+    acquired = False
+    try:
+        acquired = slots.acquire(blocking=False)
+        if not acquired:
+            raise HTTPException(429, overload_message)
+        yield
+    finally:
+        try:
+            if acquired:
+                slots.release()
+        finally:
+            release_operation_lock(lock_key, lock)
+
+
+@contextmanager
+def recording_quota_guard():
+    """Serialize committed recording changes across workers without blocking async tasks."""
+    lock = coordinator.lock("recording-quota", lease_seconds=180)
+    if not lock.acquire(blocking=False):
+        raise HTTPException(429, "录像空间正在更新，请稍后重试")
+    try:
+        yield
+    finally:
+        lock.release()
 
 def get_db():
     db = SessionLocal()
@@ -1875,7 +1911,11 @@ def interview_recording_manifest_path(interview: Interview) -> Path:
 def recording_usage_bytes(user_id: int | None = None) -> int:
     pattern = f"user-{user_id}-interview-*.webm" if user_id is not None else "user-*-interview-*.webm"
     total = 0
-    for path in RECORDING_DIR.glob(pattern):
+    paths = list(RECORDING_DIR.glob(pattern))
+    # Failed deletions and crash-recovery copies still occupy quota until erased.
+    # Moving a file to/from quarantine must not temporarily create free capacity.
+    paths.extend((RECORDING_DIR / ".trash").glob(f"interview-*-*/{pattern}"))
+    for path in paths:
         try:
             total += path.stat().st_size
         except FileNotFoundError:
@@ -1967,35 +2007,36 @@ def reconcile_recording_trash(db: Session) -> None:
     trash_root = RECORDING_DIR / ".trash"
     if not trash_root.exists():
         return
-    for directory in trash_root.glob("interview-*-*"):
-        if not directory.is_dir():
-            continue
-        try:
-            interview_id = int(directory.name.split("-", 2)[1])
-        except (IndexError, ValueError):
-            logger.warning("Unknown recording trash directory left untouched: %s", directory.name)
-            continue
-        if db.get(Interview, interview_id):
-            restore_failed = False
-            for source in directory.iterdir():
-                destination = RECORDING_DIR / source.name
-                if destination.exists():
-                    restore_failed = True
-                    logger.error("Cannot restore quarantined recording because target exists: %s", source.name)
-                    continue
-                try:
-                    source.replace(destination)
-                except OSError:
-                    restore_failed = True
-                    logger.exception("Failed to restore quarantined recording: %s", source.name)
-            if not restore_failed:
+    with recording_quota_guard():
+        for directory in trash_root.glob("interview-*-*"):
+            if not directory.is_dir():
+                continue
+            try:
+                interview_id = int(directory.name.split("-", 2)[1])
+            except (IndexError, ValueError):
+                logger.warning("Unknown recording trash directory left untouched: %s", directory.name)
+                continue
+            if db.get(Interview, interview_id):
+                restore_failed = False
+                for source in directory.iterdir():
+                    destination = RECORDING_DIR / source.name
+                    if destination.exists():
+                        restore_failed = True
+                        logger.error("Cannot restore quarantined recording because target exists: %s", source.name)
+                        continue
+                    try:
+                        source.replace(destination)
+                    except OSError:
+                        restore_failed = True
+                        logger.exception("Failed to restore quarantined recording: %s", source.name)
+                if not restore_failed:
+                    shutil.rmtree(directory, ignore_errors=True)
+            else:
                 shutil.rmtree(directory, ignore_errors=True)
-        else:
-            shutil.rmtree(directory, ignore_errors=True)
-    try:
-        trash_root.rmdir()
-    except OSError:
-        pass
+        try:
+            trash_root.rmdir()
+        except OSError:
+            pass
 
 SQLITE_COMPAT_COLUMNS: dict[str, dict[str, str]] = {
     "users": {
@@ -2164,6 +2205,9 @@ def validate_runtime_config() -> None:
 
 
 app = FastAPI(title="AI数字人面试 API", version="0.1.0")
+install_admin_demo_routes(
+    app, admin_user, BASE_DIR / "apps/web/src/data/adminInterviewScript.json",
+)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=configured_cors_origins(),
@@ -3365,14 +3409,11 @@ async def upload_interview_recording_chunk(
         raise HTTPException(415, "面试录像需要使用 WebM 格式")
 
     lock_key = f"recording:{interview_id}"
-    lock = operation_lock(lock_key)
-    if not lock.acquire(blocking=False):
-        raise HTTPException(409, "上一段录像仍在保存，请稍候")
-    write_slot_acquired = _recording_write_slots.acquire(blocking=False)
-    if not write_slot_acquired:
-        release_operation_lock(lock_key, lock)
-        raise HTTPException(429, "当前录像写入任务较多，请稍后重试")
-    try:
+    with operation_capacity(
+        lock_key, _recording_write_slots,
+        busy_message="上一段录像仍在保存，请稍候",
+        overload_message="当前录像写入任务较多，请稍后重试",
+    ):
         interview = owned_interview(interview_id, user, db)
         target = interview_recording_path(interview)
         state = load_recording_manifest(interview)
@@ -3447,45 +3488,46 @@ async def upload_interview_recording_chunk(
         recorded_size = int(state.get("size", 0))
         if recorded_size + len(incoming) > MAX_RECORDING_BYTES:
             raise HTTPException(413, "面试录像超过 800MB，请结束本场面试")
-        ensure_recording_quota(
-            user.id,
-            target,
-            recorded_size + len(incoming),
-            preserve_current=reset_target,
-        )
-        if shutil.disk_usage(RECORDING_DIR).free < len(incoming) + MIN_FREE_DISK_BYTES:
-            raise HTTPException(507, "磁盘剩余空间不足，录像未继续写入")
+        with recording_quota_guard():
+            ensure_recording_quota(
+                user.id,
+                target,
+                recorded_size + len(incoming),
+                preserve_current=reset_target,
+            )
+            if shutil.disk_usage(RECORDING_DIR).free < len(incoming) + MIN_FREE_DISK_BYTES:
+                raise HTTPException(507, "磁盘剩余空间不足，录像未继续写入")
 
-        if reset_target:
-            temporary = target.with_suffix(f".{upload_id}.reset.tmp")
-            try:
-                with temporary.open("wb") as output:
+            if reset_target:
+                temporary = target.with_suffix(f".{upload_id}.reset.tmp")
+                try:
+                    with temporary.open("wb") as output:
+                        output.write(incoming)
+                        output.flush()
+                        os.fsync(output.fileno())
+                    archive_current_recording(interview, previous_upload_id)
+                    temporary.replace(target)
+                finally:
+                    temporary.unlink(missing_ok=True)
+            else:
+                actual_size = target.stat().st_size if target.exists() else 0
+                if actual_size > recorded_size:
+                    with target.open("r+b") as output:
+                        output.truncate(recorded_size)
+                elif actual_size < recorded_size:
+                    raise HTTPException(500, "已保存录像长度异常，请保留日志并重新开始面试")
+            if incoming and not reset_target:
+                with target.open("ab") as output:
                     output.write(incoming)
                     output.flush()
                     os.fsync(output.fileno())
-                archive_current_recording(interview, previous_upload_id)
-                temporary.replace(target)
-            finally:
-                temporary.unlink(missing_ok=True)
-        else:
-            actual_size = target.stat().st_size if target.exists() else 0
-            if actual_size > recorded_size:
-                with target.open("r+b") as output:
-                    output.truncate(recorded_size)
-            elif actual_size < recorded_size:
-                raise HTTPException(500, "已保存录像长度异常，请保留日志并重新开始面试")
-        if incoming and not reset_target:
-            with target.open("ab") as output:
-                output.write(incoming)
-                output.flush()
-                os.fsync(output.fileno())
 
-        state["next_index"] = index + 1
-        state["size"] = recorded_size + len(incoming)
-        state["completed"] = bool(final)
-        hashes = state.setdefault("hashes", {})
-        hashes[str(index)] = hashlib.sha256(incoming).hexdigest()
-        save_recording_manifest(interview, state)
+            state["next_index"] = index + 1
+            state["size"] = recorded_size + len(incoming)
+            state["completed"] = bool(final)
+            hashes = state.setdefault("hashes", {})
+            hashes[str(index)] = hashlib.sha256(incoming).hexdigest()
+            save_recording_manifest(interview, state)
         return {
             "saved": True,
             "completed": bool(final),
@@ -3493,9 +3535,6 @@ async def upload_interview_recording_chunk(
             "size": state["size"],
             "recording_url": f"/api/interviews/{interview.id}/recording",
         }
-    finally:
-        _recording_write_slots.release()
-        release_operation_lock(lock_key, lock)
 
 @app.post("/api/interviews/{interview_id}/recording")
 async def upload_interview_recording(
@@ -3505,14 +3544,11 @@ async def upload_interview_recording(
     db: Session = Depends(get_db),
 ):
     lock_key = f"recording:{interview_id}"
-    lock = operation_lock(lock_key)
-    if not lock.acquire(blocking=False):
-        raise HTTPException(409, "另一项录像上传仍在进行，请稍候")
-    write_slot_acquired = _recording_write_slots.acquire(blocking=False)
-    if not write_slot_acquired:
-        release_operation_lock(lock_key, lock)
-        raise HTTPException(429, "当前录像写入任务较多，请稍后重试")
-    try:
+    with operation_capacity(
+        lock_key, _recording_write_slots,
+        busy_message="另一项录像上传仍在进行，请稍候",
+        overload_message="当前录像写入任务较多，请稍后重试",
+    ):
         interview = owned_interview(interview_id, user, db)
         if not is_webm_upload(file):
             raise HTTPException(415, "面试录像需要使用 WebM 格式")
@@ -3545,17 +3581,15 @@ async def upload_interview_recording(
                 raise
             if not total:
                 raise HTTPException(422, "上传的面试录像为空")
-            ensure_recording_quota(user.id, target, total)
-            if shutil.disk_usage(RECORDING_DIR).free < MIN_FREE_DISK_BYTES:
-                raise HTTPException(507, "磁盘剩余空间不足，录像未保存")
-            temporary.replace(target)
-            interview_recording_manifest_path(interview).unlink(missing_ok=True)
+            with recording_quota_guard():
+                ensure_recording_quota(user.id, target, total)
+                if shutil.disk_usage(RECORDING_DIR).free < MIN_FREE_DISK_BYTES:
+                    raise HTTPException(507, "磁盘剩余空间不足，录像未保存")
+                temporary.replace(target)
+                interview_recording_manifest_path(interview).unlink(missing_ok=True)
         finally:
             temporary.unlink(missing_ok=True)
         return {"saved": True, "size": total, "recording_url": f"/api/interviews/{interview.id}/recording"}
-    finally:
-        _recording_write_slots.release()
-        release_operation_lock(lock_key, lock)
 
 @app.post("/api/interviews/{interview_id}/behavior")
 def save_interview_behavior(
@@ -3701,14 +3735,11 @@ def create_interview_document(
     db: Session = Depends(get_db),
 ):
     lock_key = f"document:{interview_id}:{request.format}"
-    lock = operation_lock(lock_key)
-    if not lock.acquire(blocking=False):
-        raise HTTPException(409, "这份文档正在生成，请稍候")
-    slot_acquired = _document_preview_slots.acquire(blocking=False)
-    if not slot_acquired:
-        release_operation_lock(lock_key, lock)
-        raise HTTPException(429, "当前文档生成任务较多，请稍后重试")
-    try:
+    with operation_capacity(
+        lock_key, _document_preview_slots,
+        busy_message="这份文档正在生成，请稍候",
+        overload_message="当前文档生成任务较多，请稍后重试",
+    ):
         interview = owned_interview(interview_id, user, db)
         report = db.scalar(select(InterviewReport).where(InterviewReport.interview_id == interview.id))
         if not report or interview.status != "completed":
@@ -3774,9 +3805,6 @@ def create_interview_document(
         db.commit()
         db.refresh(document)
         return interview_document_payload(document)
-    finally:
-        _document_preview_slots.release()
-        release_operation_lock(lock_key, lock)
 
 @app.get("/api/interviews/{interview_id}/documents")
 def list_interview_documents(
@@ -3806,81 +3834,76 @@ def preview_unexported_interview_document(
         raise HTTPException(422, "预览格式仅支持 PDF 或 Word")
     rate_limit_document_preview(request, user)
     lock_key = f"document-preview:{interview_id}:{format_name}"
-    lock = operation_lock(lock_key)
-    if not lock.acquire(blocking=False):
-        raise HTTPException(409, "这份预览正在生成，请稍候")
-    slot_acquired = _document_preview_slots.acquire(blocking=False)
-    if not slot_acquired:
-        release_operation_lock(lock_key, lock)
-        raise HTTPException(429, "当前预览任务较多，请稍后重试")
-    try:
-        interview = db.get(Interview, interview_id)
-        if not interview:
-            raise HTTPException(404, "面试记录不存在")
-        report = db.scalar(select(InterviewReport).where(InterviewReport.interview_id == interview.id))
-        if not report or interview.status != "completed":
-            raise HTTPException(409, "这场面试尚未生成完整报告，暂时无法预览文档")
-
-        messages = effective_transcript(interview.id, db)
+    with operation_capacity(
+        lock_key, _document_preview_slots,
+        busy_message="这份预览正在生成，请稍候",
+        overload_message="当前预览任务较多，请稍后重试",
+    ):
         try:
-            report_payload = document_report_payload(report.payload_json, messages)
-        except (json.JSONDecodeError, ValueError, TypeError) as exc:
-            logger.warning("Stored report validation failed for interview %s", interview.id)
-            raise HTTPException(422, "这场面试的历史报告数据不完整，请重新生成报告") from exc
-        candidate = db.get(User, interview.user_id)
-        with tempfile.TemporaryDirectory(prefix="ai-interview-preview-") as temporary_dir:
-            temporary_path = Path(temporary_dir)
-            preview_path = temporary_path / f"interview-{interview.id}-{format_name}-preview.pdf"
-            if format_name == "docx":
-                source_path = temporary_path / f"interview-{interview.id}-preview.docx"
-                build_export(
-                    source_path,
-                    format_name="docx",
-                    candidate_name=candidate.display_name if candidate else "面试者",
-                    target_role=interview.target_role or "综合岗位探索",
-                    started_at=interview.finished_at or interview.started_at,
-                    report=report_payload,
-                )
-                renderer = convert_docx_to_pdf(source_path, preview_path)
-            else:
-                build_export(
-                    preview_path,
-                    format_name="pdf",
-                    candidate_name=candidate.display_name if candidate else "面试者",
-                    target_role=interview.target_role or "综合岗位探索",
-                    started_at=interview.finished_at or interview.started_at,
-                    report=report_payload,
-                )
-                renderer = "reportlab"
-            if preview_path.stat().st_size > MAX_DOCUMENT_PREVIEW_BYTES:
-                raise HTTPException(413, "文档预览超过大小限制")
-            preview_bytes = preview_path.read_bytes()
-    except HTTPException:
-        raise
-    except DocumentConversionError as exc:
-        logger.warning("DOCX preview conversion failed for interview %s: %s", interview_id, exc)
-        raise HTTPException(503, "真实 Word 预览转换失败，请确认 Word 或 LibreOffice 可用后重试") from exc
-    except OSError as exc:
-        raise HTTPException(507, "文档预览生成失败，请检查本机临时空间") from exc
-    except Exception as exc:
-        logger.exception("Document preview generation failed for interview %s", interview_id)
-        raise HTTPException(500, "文档预览生成失败，请稍后重试") from exc
-    finally:
-        _document_preview_slots.release()
-        release_operation_lock(lock_key, lock)
+            interview = db.get(Interview, interview_id)
+            if not interview:
+                raise HTTPException(404, "面试记录不存在")
+            report = db.scalar(select(InterviewReport).where(InterviewReport.interview_id == interview.id))
+            if not report or interview.status != "completed":
+                raise HTTPException(409, "这场面试尚未生成完整报告，暂时无法预览文档")
 
-    return Response(
-        content=preview_bytes,
-        media_type="application/pdf",
-        headers={
-            "Content-Disposition": f'inline; filename="interview-{interview.id}-{format_name}-preview.pdf"',
-            "Cache-Control": "private, no-store, max-age=0",
-            "Pragma": "no-cache",
-            "X-Document-Format": format_name,
-            "X-Document-State": "draft-preview",
-            "X-Document-Renderer": renderer,
-        },
-    )
+            messages = effective_transcript(interview.id, db)
+            try:
+                report_payload = document_report_payload(report.payload_json, messages)
+            except (json.JSONDecodeError, ValueError, TypeError) as exc:
+                logger.warning("Stored report validation failed for interview %s", interview.id)
+                raise HTTPException(422, "这场面试的历史报告数据不完整，请重新生成报告") from exc
+            candidate = db.get(User, interview.user_id)
+            with tempfile.TemporaryDirectory(prefix="ai-interview-preview-") as temporary_dir:
+                temporary_path = Path(temporary_dir)
+                preview_path = temporary_path / f"interview-{interview.id}-{format_name}-preview.pdf"
+                if format_name == "docx":
+                    source_path = temporary_path / f"interview-{interview.id}-preview.docx"
+                    build_export(
+                        source_path,
+                        format_name="docx",
+                        candidate_name=candidate.display_name if candidate else "面试者",
+                        target_role=interview.target_role or "综合岗位探索",
+                        started_at=interview.finished_at or interview.started_at,
+                        report=report_payload,
+                    )
+                    renderer = convert_docx_to_pdf(source_path, preview_path)
+                else:
+                    build_export(
+                        preview_path,
+                        format_name="pdf",
+                        candidate_name=candidate.display_name if candidate else "面试者",
+                        target_role=interview.target_role or "综合岗位探索",
+                        started_at=interview.finished_at or interview.started_at,
+                        report=report_payload,
+                    )
+                    renderer = "reportlab"
+                if preview_path.stat().st_size > MAX_DOCUMENT_PREVIEW_BYTES:
+                    raise HTTPException(413, "文档预览超过大小限制")
+                preview_bytes = preview_path.read_bytes()
+        except HTTPException:
+            raise
+        except DocumentConversionError as exc:
+            logger.warning("DOCX preview conversion failed for interview %s: %s", interview_id, exc)
+            raise HTTPException(503, "真实 Word 预览转换失败，请确认 Word 或 LibreOffice 可用后重试") from exc
+        except OSError as exc:
+            raise HTTPException(507, "文档预览生成失败，请检查本机临时空间") from exc
+        except Exception as exc:
+            logger.exception("Document preview generation failed for interview %s", interview_id)
+            raise HTTPException(500, "文档预览生成失败，请稍后重试") from exc
+
+        return Response(
+            content=preview_bytes,
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": f'inline; filename="interview-{interview.id}-{format_name}-preview.pdf"',
+                "Cache-Control": "private, no-store, max-age=0",
+                "Pragma": "no-cache",
+                "X-Document-Format": format_name,
+                "X-Document-State": "draft-preview",
+                "X-Document-Renderer": renderer,
+            },
+        )
 
 def get_authorized_document(interview_id: int, document_id: int, user: User, db: Session) -> InterviewDocument:
     interview = owned_interview(interview_id, user, db, allow_admin=True)
@@ -3924,88 +3947,93 @@ def delete_interview(interview_id: int, user: User = Depends(current_user), db: 
     if not interview_lock.acquire(blocking=False):
         raise HTTPException(409, "本场面试仍有操作正在处理，请稍后再删除")
     recording_lock = operation_lock(recording_key)
-    if not recording_lock.acquire(blocking=False):
-        release_operation_lock(interview_key, interview_lock)
-        raise HTTPException(409, "本场录像仍在保存，请稍后再删除")
+    recording_acquired = False
     try:
+        recording_acquired = recording_lock.acquire(blocking=False)
+        if not recording_acquired:
+            raise HTTPException(409, "本场录像仍在保存，请稍后再删除")
         interview = owned_interview(interview_id, user, db)
-        recording_paths = list(RECORDING_DIR.glob(f"user-{user.id}-interview-{interview_id}.*"))
-        document_rows = list(db.scalars(
-            select(InterviewDocument).where(InterviewDocument.interview_id == interview.id)
-        ).all())
-        document_paths = {
-            Path(path_value)
-            for item in document_rows
-            for path_value in (item.file_path, item.preview_path)
-            if path_value
-        }
-        quarantine = RECORDING_DIR / ".trash" / f"interview-{interview_id}-{uuid.uuid4().hex}"
-        moved_paths: list[tuple[Path, Path]] = []
-        try:
-            if recording_paths:
-                quarantine.mkdir(parents=True, exist_ok=False)
-            for source in recording_paths:
-                destination = quarantine / source.name
-                source.replace(destination)
-                moved_paths.append((source, destination))
-        except OSError as exc:
-            for source, destination in reversed(moved_paths):
+        with recording_quota_guard():
+            recording_paths = list(RECORDING_DIR.glob(f"user-{user.id}-interview-{interview_id}.*"))
+            document_rows = list(db.scalars(
+                select(InterviewDocument).where(InterviewDocument.interview_id == interview.id)
+            ).all())
+            document_paths = {
+                Path(path_value)
+                for item in document_rows
+                for path_value in (item.file_path, item.preview_path)
+                if path_value
+            }
+            quarantine = RECORDING_DIR / ".trash" / f"interview-{interview_id}-{uuid.uuid4().hex}"
+            moved_paths: list[tuple[Path, Path]] = []
+            try:
+                if recording_paths:
+                    quarantine.mkdir(parents=True, exist_ok=False)
+                for source in recording_paths:
+                    destination = quarantine / source.name
+                    source.replace(destination)
+                    moved_paths.append((source, destination))
+            except OSError as exc:
+                for source, destination in reversed(moved_paths):
+                    try:
+                        destination.replace(source)
+                    except OSError:
+                        logger.exception("Failed to restore interview file after delete preparation")
+                shutil.rmtree(quarantine, ignore_errors=True)
+                raise HTTPException(409, "录像文件正在使用，尚未删除任何面试数据，请稍后重试") from exc
+
+            try:
+                interruptions = db.scalars(select(InterviewInterruption).where(
+                    InterviewInterruption.interview_id == interview.id
+                )).all()
+                cutoff = utcnow_naive() - timedelta(seconds=FORCED_EXIT_WINDOW_SECONDS)
+                for item in interruptions:
+                    if item.created_at >= cutoff:
+                        db.add(DeletedInterviewInterruption(user_id=item.user_id, created_at=item.created_at))
+                db.flush()
+                db.execute(delete(InterviewInterruption).where(InterviewInterruption.interview_id == interview.id))
+                db.execute(delete(InterviewAnswerRequest).where(InterviewAnswerRequest.interview_id == interview.id))
+                db.execute(delete(InterviewStartRequest).where(InterviewStartRequest.interview_id == interview.id))
+                db.execute(delete(InterviewDocument).where(InterviewDocument.interview_id == interview.id))
+                db.execute(delete(InterviewReport).where(InterviewReport.interview_id == interview.id))
+                db.execute(delete(InterviewBehavior).where(InterviewBehavior.interview_id == interview.id))
+                db.execute(delete(InterviewCorrection).where(InterviewCorrection.interview_id == interview.id))
+                db.execute(delete(InterviewMessage).where(InterviewMessage.interview_id == interview.id))
+                db.delete(interview)
+                db.commit()
+            except Exception:
+                db.rollback()
+                for source, destination in reversed(moved_paths):
+                    if destination.exists() and not source.exists():
+                        destination.replace(source)
+                shutil.rmtree(quarantine, ignore_errors=True)
+                raise
+
+            cleanup_pending = False
+            if quarantine.exists():
                 try:
-                    destination.replace(source)
+                    shutil.rmtree(quarantine)
                 except OSError:
-                    logger.exception("Failed to restore interview file after delete preparation")
-            shutil.rmtree(quarantine, ignore_errors=True)
-            raise HTTPException(409, "录像文件正在使用，尚未删除任何面试数据，请稍后重试") from exc
-
-        try:
-            interruptions = db.scalars(select(InterviewInterruption).where(
-                InterviewInterruption.interview_id == interview.id
-            )).all()
-            cutoff = utcnow_naive() - timedelta(seconds=FORCED_EXIT_WINDOW_SECONDS)
-            for item in interruptions:
-                if item.created_at >= cutoff:
-                    db.add(DeletedInterviewInterruption(user_id=item.user_id, created_at=item.created_at))
-            db.flush()
-            db.execute(delete(InterviewInterruption).where(InterviewInterruption.interview_id == interview.id))
-            db.execute(delete(InterviewAnswerRequest).where(InterviewAnswerRequest.interview_id == interview.id))
-            db.execute(delete(InterviewStartRequest).where(InterviewStartRequest.interview_id == interview.id))
-            db.execute(delete(InterviewDocument).where(InterviewDocument.interview_id == interview.id))
-            db.execute(delete(InterviewReport).where(InterviewReport.interview_id == interview.id))
-            db.execute(delete(InterviewBehavior).where(InterviewBehavior.interview_id == interview.id))
-            db.execute(delete(InterviewCorrection).where(InterviewCorrection.interview_id == interview.id))
-            db.execute(delete(InterviewMessage).where(InterviewMessage.interview_id == interview.id))
-            db.delete(interview)
-            db.commit()
-        except Exception:
-            db.rollback()
-            for source, destination in reversed(moved_paths):
-                if destination.exists() and not source.exists():
-                    destination.replace(source)
-            shutil.rmtree(quarantine, ignore_errors=True)
-            raise
-
-        cleanup_pending = False
-        if quarantine.exists():
-            try:
-                shutil.rmtree(quarantine)
-            except OSError:
-                cleanup_pending = True
-                logger.warning("Interview data was quarantined but could not yet be erased: %s", quarantine.name)
-        for path in document_paths:
-            try:
-                if path.parent.resolve() == DOCUMENT_DIR.resolve():
-                    path.unlink(missing_ok=True)
-            except OSError:
-                cleanup_pending = True
-                logger.warning("Interview document could not yet be erased: %s", path.name)
-        return {
-            "deleted": True,
-            "interview_id": interview_id,
-            "cleanup_pending": cleanup_pending,
-        }
+                    cleanup_pending = True
+                    logger.warning("Interview data was quarantined but could not yet be erased: %s", quarantine.name)
+            for path in document_paths:
+                try:
+                    if path.parent.resolve() == DOCUMENT_DIR.resolve():
+                        path.unlink(missing_ok=True)
+                except OSError:
+                    cleanup_pending = True
+                    logger.warning("Interview document could not yet be erased: %s", path.name)
+            return {
+                "deleted": True,
+                "interview_id": interview_id,
+                "cleanup_pending": cleanup_pending,
+            }
     finally:
-        release_operation_lock(recording_key, recording_lock)
-        release_operation_lock(interview_key, interview_lock)
+        try:
+            if recording_acquired:
+                release_operation_lock(recording_key, recording_lock)
+        finally:
+            release_operation_lock(interview_key, interview_lock)
 
 @app.get("/api/interviews")
 def list_interviews(user: User = Depends(current_user), db: Session = Depends(get_db)):

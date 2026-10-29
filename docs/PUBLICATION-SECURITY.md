@@ -9,7 +9,7 @@
 | 简历、回答和报告 | `data/uploads`、数据库、`data/documents`、`outputs` | 真实身份、联系方式、经历和面试内容 |
 | 录音录像与分析记录 | `data/recordings`、日志、截图 | 声音、面部、行为和对话等个人信息 |
 | 局域网证书 | `data/lan-cert` | 私钥与本机信任材料不能共享复用 |
-| 私人测试剧本 | 本机 `apps/web/src/data/adminInterviewScript.json` | 会被前端构建嵌入；公开副本必须整份替换成虚构样例 |
+| 私人测试剧本 | 本机 `apps/web/src/data/adminInterviewScript.json` | 仅由管理员鉴权接口按需读取，不嵌入网页包；公开副本必须整份替换成虚构样例 |
 | 交付文档、缓存和历史 | `deliverables`、`tmp`、`outputs`、根目录截图等 | 可能包含真实姓名、账户、旧 Key、电脑路径与演示记录 |
 | 第三方模型和人物资源 | `assets`、`integrations`、Web public 媒体 | 涉及独立授权，不由本项目 MIT 许可覆盖 |
 
@@ -43,5 +43,7 @@
 ## 调度台私人简历与模拟问答
 
 公开清单强制把 `release/demo-public.json` 映射到前端的 `adminInterviewScript.json`，禁止直接导出本机私人剧本。公开样例整份使用虚构身份、教育经历、项目和回答；本机私人剧本继续保留且被 Git 忽略。
+
+本机管理台通过 `GET /api/admin/demo-script` 鉴权读取剧本，响应禁止缓存；普通学生和未登录访问者均不可读取。前端不得静态导入此文件，Vite 开发服务也拒绝直接访问其 JSON、raw 和 import 地址。切换账号或退出时清理旧界面并取消旧请求，避免跨账号保留管理台内容。
 
 本机导出检查除姓名外，还会比对私人剧本的简历段落、较长片段及模拟回答，防止只改姓名却保留个人经历。检查只输出文件位置与规则，不输出私人内容。不要把私人简历写进公开模板、源码、README、测试用例或图片；任何新的公开截图都需重新审核。

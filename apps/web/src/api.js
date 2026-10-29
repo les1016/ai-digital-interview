@@ -4,8 +4,13 @@ const DEFAULT_API_BASE = LOOPBACK_HOSTS.has(window.location.hostname)
   : `${window.location.origin}/api`
 const API_BASE = (import.meta.env.VITE_API_BASE_URL || DEFAULT_API_BASE).replace(/\/+$/, '')
 const DEFAULT_TIMEOUT = 75000
-const TOKEN_KEY = 'ai-interview-token'
+export const TOKEN_KEY = 'ai-interview-token'
 let memoryToken = ''
+// Bind requests to the identity accepted by this tab, not a new storage value
+// that another tab wrote before React has restored the corresponding user.
+let acceptedToken
+let pendingChangedToken
+const sessionRequests = new Set()
 
 export class ApiError extends Error {
   constructor(message, { status = 0, code = 'request_failed', retryable = false } = {}) {
@@ -19,14 +24,18 @@ export class ApiError extends Error {
 
 export function getToken() {
   try {
-    return localStorage.getItem(TOKEN_KEY) || memoryToken
+    memoryToken = localStorage.getItem(TOKEN_KEY) || ''
+    return memoryToken
   } catch {
     return memoryToken
   }
 }
 
 export function setToken(token) {
+  cancelSessionRequests()
   memoryToken = token || ''
+  acceptedToken = memoryToken
+  pendingChangedToken = undefined
   try {
     if (token) localStorage.setItem(TOKEN_KEY, token)
     else localStorage.removeItem(TOKEN_KEY)
@@ -35,14 +44,57 @@ export function setToken(token) {
   }
 }
 
-export async function api(path, options = {}) {
-  const { timeout = DEFAULT_TIMEOUT, signal, ...fetchOptions } = options
-  const headers = new Headers(fetchOptions.headers || {})
+export function cancelSessionRequests() {
+  for (const controller of sessionRequests) controller.abort('session_changed')
+  sessionRequests.clear()
+  avatarTicketCache = null
+  avatarTicketPending = null
+}
+
+export function beginSessionChange() {
+  cancelSessionRequests()
+  pendingChangedToken = getToken()
+  return pendingChangedToken
+}
+
+export function acceptSessionToken(token) {
+  if (getToken() !== token) return false
+  acceptedToken = token
+  pendingChangedToken = undefined
+  return true
+}
+
+function requestToken(expectedToken) {
   const token = getToken()
+  if (expectedToken !== undefined) {
+    if (token === expectedToken) return token
+  } else {
+    if (acceptedToken === undefined) acceptedToken = token
+    if (token === acceptedToken) return token
+  }
+  cancelSessionRequests()
+  if (pendingChangedToken !== token) {
+    pendingChangedToken = token
+    window.dispatchEvent(new Event('ai-interview-session-changed'))
+  }
+  throw new ApiError('登录状态已改变，请等待页面恢复后重试', { code: 'session_changed' })
+}
+
+function ensureResponseSession(token, controller) {
+  if (getToken() !== token || controller.signal.reason === 'session_changed') {
+    throw new ApiError('登录状态已改变，请重试', { code: 'session_changed' })
+  }
+}
+
+export async function api(path, options = {}) {
+  const { timeout = DEFAULT_TIMEOUT, signal, expectedToken, ...fetchOptions } = options
+  const headers = new Headers(fetchOptions.headers || {})
+  const token = requestToken(expectedToken)
   if (token) headers.set('Authorization', `Bearer ${token}`)
   if (fetchOptions.body && !(fetchOptions.body instanceof FormData)) headers.set('Content-Type', 'application/json')
 
   const controller = new AbortController()
+  sessionRequests.add(controller)
   const abortFromCaller = () => controller.abort(signal?.reason)
   if (signal) {
     if (signal.aborted) abortFromCaller()
@@ -57,6 +109,7 @@ export async function api(path, options = {}) {
       signal: controller.signal,
     })
     const payload = await response.json().catch(() => ({}))
+    ensureResponseSession(token, controller)
     if (!response.ok) {
       if (response.status === 401 && token && getToken() === token) {
         setToken('')
@@ -74,6 +127,9 @@ export async function api(path, options = {}) {
     return payload
   } catch (reason) {
     if (reason instanceof ApiError) throw reason
+    if (controller.signal.reason === 'session_changed') {
+      throw new ApiError('登录状态已改变，请重试', { code: 'session_changed' })
+    }
     if (controller.signal.aborted && !signal?.aborted) {
       throw new ApiError('请求等待超时，请检查服务状态后重试', {
         code: 'timeout',
@@ -88,6 +144,7 @@ export async function api(path, options = {}) {
       retryable: true,
     })
   } finally {
+    sessionRequests.delete(controller)
     window.clearTimeout(timer)
     signal?.removeEventListener('abort', abortFromCaller)
   }
@@ -108,11 +165,12 @@ export function apiKeepalive(path, body) {
 }
 
 export async function apiBlob(path, options = {}) {
-  const { timeout = DEFAULT_TIMEOUT, signal, ...fetchOptions } = options
+  const { timeout = DEFAULT_TIMEOUT, signal, expectedToken, ...fetchOptions } = options
   const headers = new Headers(fetchOptions.headers || {})
-  const token = getToken()
+  const token = requestToken(expectedToken)
   if (token) headers.set('Authorization', `Bearer ${token}`)
   const controller = new AbortController()
+  sessionRequests.add(controller)
   const abortFromCaller = () => controller.abort(signal?.reason)
   if (signal) {
     if (signal.aborted) abortFromCaller()
@@ -121,6 +179,7 @@ export async function apiBlob(path, options = {}) {
   const timer = window.setTimeout(() => controller.abort('timeout'), timeout)
   try {
     const response = await fetch(`${API_BASE}${path}`, { ...fetchOptions, headers, signal: controller.signal })
+    ensureResponseSession(token, controller)
     if (!response.ok) {
       const payload = await response.json().catch(() => ({}))
       if (response.status === 401 && token && getToken() === token) {
@@ -133,15 +192,21 @@ export async function apiBlob(path, options = {}) {
         retryable: response.status === 408 || response.status === 429 || response.status >= 500,
       })
     }
-    return response.blob()
+    const blob = await response.blob()
+    ensureResponseSession(token, controller)
+    return blob
   } catch (reason) {
     if (reason instanceof ApiError) throw reason
+    if (controller.signal.reason === 'session_changed') {
+      throw new ApiError('登录状态已改变，请重试', { code: 'session_changed' })
+    }
     if (controller.signal.aborted && !signal?.aborted) {
       throw new ApiError('文档请求等待超时，请稍后重试', { code: 'timeout', retryable: true })
     }
     if (signal?.aborted) throw new ApiError('请求已取消', { code: 'aborted' })
     throw new ApiError('无法连接本地服务，请确认一键启动已成功运行', { code: 'network_error', retryable: true })
   } finally {
+    sessionRequests.delete(controller)
     window.clearTimeout(timer)
     signal?.removeEventListener('abort', abortFromCaller)
   }
@@ -150,7 +215,7 @@ export async function apiBlob(path, options = {}) {
 let avatarTicketCache = null
 let avatarTicketPending = null
 async function getAvatarTicket() {
-  const accessToken = getToken()
+  const accessToken = requestToken()
   if (avatarTicketCache?.accessToken === accessToken && avatarTicketCache.expires > Date.now()) return avatarTicketCache.token
   if (avatarTicketPending?.accessToken === accessToken) return avatarTicketPending.promise
   const pending = { accessToken, promise: null }
@@ -164,12 +229,16 @@ async function getAvatarTicket() {
 }
 
 export async function avatarFetch(url, options = {}) {
+  const accessToken = requestToken()
   const headers = new Headers(options.headers || {})
   headers.set('Authorization', `Bearer ${await getAvatarTicket()}`)
+  if (getToken() !== accessToken) throw new ApiError('登录状态已改变，请重试', { code: 'session_changed' })
   return fetch(url, { ...options, headers })
 }
 
 export async function avatarSocket(url) {
+  const accessToken = requestToken()
   const ticket = await getAvatarTicket()
+  if (getToken() !== accessToken) throw new ApiError('登录状态已改变，请重试', { code: 'session_changed' })
   return new WebSocket(url, ['asr', `auth.${ticket}`])
 }

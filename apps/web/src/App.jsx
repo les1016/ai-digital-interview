@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { ArrowRight, BookOpen, Check, CircleUserRound, Sparkles } from 'lucide-react'
 import AuthDialog from './AuthDialog'
 import Workspace from './Workspace'
-import { api, getToken, setToken } from './api'
+import { api, getToken, setToken, TOKEN_KEY, beginSessionChange, acceptSessionToken, cancelSessionRequests } from './api'
 import ParticleField from './ParticleField'
 
 const stages = [
@@ -17,22 +17,61 @@ function App() {
   const [user, setUser] = useState(null)
   const [checkingSession, setCheckingSession] = useState(() => Boolean(getToken()))
   useEffect(() => {
-    const controller = new AbortController()
-    const expireSession = () => setUser(null)
-    window.addEventListener('ai-interview-auth-expired', expireSession)
-    if (getToken()) {
-      api('/me', { signal: controller.signal })
-        .then(setUser)
-        .catch(reason => { if (reason.code !== 'aborted') setToken('') })
-        .finally(() => setCheckingSession(false))
+    let controller
+    let revision = 0
+    let disposed = false
+    const restoreSession = () => {
+      const currentRevision = ++revision
+      controller?.abort()
+      const token = beginSessionChange()
+      setUser(null)
+      setAuthOpen(false)
+      setCheckingSession(Boolean(token))
+      if (!token) {
+        acceptSessionToken('')
+        return
+      }
+      controller = new AbortController()
+      const restoreController = controller
+      // A previous account's delayed response must never replace or log out
+      // the new account that a later storage event has already restored.
+      const isCurrent = () => !disposed && revision === currentRevision && getToken() === token
+      api('/me', { signal: restoreController.signal, expectedToken: token })
+        .then(result => {
+          if (isCurrent() && acceptSessionToken(token)) setUser(result)
+        })
+        .catch(reason => {
+          if (isCurrent() && reason.code !== 'aborted' && reason.code !== 'session_changed') setToken('')
+        })
+        .finally(() => { if (isCurrent() || (!disposed && revision === currentRevision && !getToken())) setCheckingSession(false) })
     }
+    const expireSession = () => {
+      revision += 1
+      controller?.abort()
+      cancelSessionRequests()
+      setUser(null)
+      setAuthOpen(false)
+      setCheckingSession(false)
+    }
+    const storageChanged = event => {
+      if ((event.key === TOKEN_KEY || event.key === null) && (!event.storageArea || event.storageArea === window.localStorage)) restoreSession()
+    }
+    window.addEventListener('ai-interview-auth-expired', expireSession)
+    window.addEventListener('ai-interview-session-changed', restoreSession)
+    window.addEventListener('storage', storageChanged)
+    restoreSession()
     return () => {
-      controller.abort()
+      disposed = true
+      revision += 1
+      controller?.abort()
+      cancelSessionRequests()
       window.removeEventListener('ai-interview-auth-expired', expireSession)
+      window.removeEventListener('ai-interview-session-changed', restoreSession)
+      window.removeEventListener('storage', storageChanged)
     }
   }, [])
   if (checkingSession) return <main className="shell"><section className="ready"><div><p className="eyebrow">正在恢复登录状态</p><h2>马上回到你的成长空间</h2></div></section></main>
-  if (user) return <Workspace user={user} onLogout={() => setUser(null)} />
+  if (user) return <Workspace key={user.id} user={user} onLogout={() => { setToken(''); setUser(null) }} />
 
   return <main className="shell">
     <ParticleField />

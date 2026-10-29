@@ -6,7 +6,6 @@ import {
   RefreshCw, RotateCcw, Save, Send, ShieldCheck, Trash2, Volume2, X,
 } from 'lucide-react'
 import ParticleField from './ParticleField'
-import script from './data/adminInterviewScript.json'
 import { api } from './api'
 import useAcknowledgment, { AcknowledgmentVideo } from './useAcknowledgment'
 import { afterAcknowledgment } from './acknowledgmentPolicy'
@@ -39,6 +38,40 @@ const safeRead = (key, fallback) => {
 const formatLogTime = value => new Date(value).toLocaleTimeString('zh-CN', { hour12: false })
 
 export default function AdminScriptedDemo({ onExit }) {
+  const [script, setScript] = useState(null)
+  const [error, setError] = useState('')
+  const [attempt, setAttempt] = useState(0)
+  useEffect(() => {
+    const controller = new AbortController()
+    setScript(null)
+    setError('')
+    api('/admin/demo-script', { signal: controller.signal, cache: 'no-store' })
+      .then(value => {
+        if (!controller.signal.aborted) setScript(value)
+      })
+      .catch(reason => {
+        if (!controller.signal.aborted) setError(reason.message || '管理员剧本加载失败')
+      })
+    return () => controller.abort()
+  }, [attempt])
+
+  if (script) return <LoadedAdminScriptedDemo script={script} onExit={onExit} />
+  return <section className="interview-room admin-preview-room">
+    <header className="room-header">
+      <button className="back-link" onClick={onExit}><ArrowLeft />返回管理台</button>
+      <div className="room-title"><b>管理员 · 固定剧本面试预览</b></div>
+    </header>
+    <div className="setup-card admin-preview-welcome" role={error ? 'alert' : 'status'}>
+      <h1>{error ? '管理员剧本加载失败' : '正在安全加载管理员剧本'}</h1>
+      <p>{error || '正在验证管理员权限并读取本机剧本。'}</p>
+      {error
+        ? <button className="primary" onClick={() => setAttempt(value => value + 1)}><RefreshCw />重新加载</button>
+        : <LoaderCircle className="spin" aria-hidden="true" />}
+    </div>
+  </section>
+}
+
+function LoadedAdminScriptedDemo({ script, onExit }) {
   const avatarVideoRef = useRef(null)
   const avatarAudioRef = useRef(null)
   const [actionCoordinator] = useState(createAvatarActionCoordinator)

@@ -32,6 +32,30 @@
     "target": "apps/server/app/__init__.py"
   },
   {
+    "source": "apps/server/app/admin_demo.py",
+    "target": "apps/server/app/admin_demo.py"
+  },
+  {
+    "source": "tests/test_admin_demo.py",
+    "target": "tests/test_admin_demo.py"
+  },
+  {
+    "source": "tests/test_resource_safety.py",
+    "target": "tests/test_resource_safety.py"
+  },
+  {
+    "source": "tests/admin_demo_privacy.test.mjs",
+    "target": "tests/admin_demo_privacy.test.mjs"
+  },
+  {
+    "source": "tests/api_session.test.mjs",
+    "target": "tests/api_session.test.mjs"
+  },
+  {
+    "source": "docs/TOOLBOX-FIXES-20261029.md",
+    "target": "docs/TOOLBOX-FIXES-20261029.md"
+  },
+  {
     "source": "apps/server/app/answer_corrections.py",
     "target": "apps/server/app/answer_corrections.py"
   },
