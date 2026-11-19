@@ -1,4 +1,4 @@
-import { avatarFetch } from './api'
+import { api, avatarFetch as authenticatedAvatarFetch } from './api'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Activity, ArrowLeft, Bug, Camera, CheckCircle2, CircleStop, Clock3, Download,
@@ -6,7 +6,7 @@ import {
   RefreshCw, RotateCcw, Save, Send, ShieldCheck, Trash2, Volume2, X,
 } from 'lucide-react'
 import ParticleField from './ParticleField'
-import { api } from './api'
+
 import useAcknowledgment, { AcknowledgmentVideo } from './useAcknowledgment'
 import { afterAcknowledgment } from './acknowledgmentPolicy'
 import useOpeningVideo, { OpeningVideo } from './useOpeningVideo'
@@ -15,6 +15,8 @@ import useAdminStartupDiagnostics from './useAdminStartupDiagnostics'
 import OpeningRulesNotice from './OpeningRulesNotice'
 import { createAvatarActionCoordinator } from './avatarActionCoordinator'
 import useSmileAction, { SmileVideo } from './useSmileAction'
+
+const avatarFetch = (url, options) => authenticatedAvatarFetch(url, options, { preview: true })
 
 const LIVETALKING_BASE = new URL(
   import.meta.env.VITE_LIVETALKING_URL

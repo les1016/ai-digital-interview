@@ -214,24 +214,25 @@ export async function apiBlob(path, options = {}) {
 
 let avatarTicketCache = null
 let avatarTicketPending = null
-async function getAvatarTicket() {
+async function getAvatarTicket(preview = false) {
   const accessToken = requestToken()
-  if (avatarTicketCache?.accessToken === accessToken && avatarTicketCache.expires > Date.now()) return avatarTicketCache.token
-  if (avatarTicketPending?.accessToken === accessToken) return avatarTicketPending.promise
-  const pending = { accessToken, promise: null }
-  pending.promise = api('/avatar/token', { method: 'POST' }).then(result => {
+  if (avatarTicketCache?.accessToken === accessToken && avatarTicketCache.preview === preview && avatarTicketCache.expires > Date.now()) return avatarTicketCache.token
+  if (avatarTicketPending?.accessToken === accessToken && avatarTicketPending.preview === preview) return avatarTicketPending.promise
+  const pending = { accessToken, preview, promise: null }
+  pending.promise = api(`/avatar/token${preview ? '?preview=true' : ''}`, { method: 'POST' }).then(result => {
     if (getToken() !== accessToken) throw new Error('登录状态已改变，请重试')
-    avatarTicketCache = { accessToken, token: result.token, expires: Date.now() + 60000 }
+    const expires = Math.min(Date.now() + 20000, Date.parse(result.expires_at) - 1000 || 0)
+    avatarTicketCache = { accessToken, preview, token: result.token, expires }
     return result.token
   }).finally(() => { if (avatarTicketPending === pending) avatarTicketPending = null })
   avatarTicketPending = pending
   return pending.promise
 }
 
-export async function avatarFetch(url, options = {}) {
+export async function avatarFetch(url, options = {}, { preview = false } = {}) {
   const accessToken = requestToken()
   const headers = new Headers(options.headers || {})
-  headers.set('Authorization', `Bearer ${await getAvatarTicket()}`)
+  headers.set('Authorization', `Bearer ${await getAvatarTicket(preview)}`)
   if (getToken() !== accessToken) throw new ApiError('登录状态已改变，请重试', { code: 'session_changed' })
   return fetch(url, { ...options, headers })
 }

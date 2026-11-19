@@ -28,12 +28,32 @@ function harness() {
   const context = { window, localStorage: storage, AbortController, Headers, FormData, Event, Blob,
     fetch: (...args) => { calls.push(args); return fetcher(...args) } }
   vm.runInNewContext(apiSource.replaceAll('import.meta.env', '({})').replace(/\bexport\s+/g, '') +
-    '\nthis.module = {getToken,setToken,beginSessionChange,acceptSessionToken,cancelSessionRequests,api,apiBlob,TOKEN_KEY};', context)
+    '\nthis.module = {getToken,setToken,beginSessionChange,acceptSessionToken,cancelSessionRequests,api,apiBlob,avatarFetch,TOKEN_KEY};', context)
   return { context, window, values, calls, module: context.module,
     blockStorage(value = true) { blocked = value },
     setFetch(value) { fetcher = value },
   }
 }
+
+test('administrator preview and scheduled interview requests use separately scoped avatar tickets', async () => {
+  const h = harness()
+  h.module.setToken('mock-access-token')
+  h.setFetch(async url => ({
+    ok: true, status: 200,
+    json: async () => ({
+      token: url.endsWith('?preview=true') ? 'mock-preview-ticket' : 'mock-appointment-ticket',
+      expires_at: new Date(Date.now() + 30000).toISOString(),
+    }),
+  }))
+  const fixture = 'http://localhost:19010/offer'
+  await h.module.avatarFetch(fixture)
+  await h.module.avatarFetch(fixture, {}, { preview: true })
+  await h.module.avatarFetch(fixture)
+  assert.deepEqual(h.calls.filter(([url]) => url === fixture).map(([, request]) => request.headers.get('Authorization')), [
+    'Bearer mock-appointment-ticket', 'Bearer mock-preview-ticket', 'Bearer mock-appointment-ticket',
+  ])
+  assert.equal(h.calls.filter(([url]) => url.endsWith('/avatar/token?preview=true')).length, 1)
+})
 
 test('storage deletion clears the memory copy; access errors retain in-memory login', () => {
   const h = harness()

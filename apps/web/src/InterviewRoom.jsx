@@ -26,14 +26,25 @@ const ANSWER_INITIAL_GRACE_MS = Number(import.meta.env.VITE_ANSWER_INITIAL_GRACE
 const ANSWER_IDLE_GRACE_MS = Number(import.meta.env.VITE_ANSWER_IDLE_GRACE_MS || 12000)
 const ANSWER_END_COUNTDOWN_SECONDS = 5
 
+function closeAvatarSession(sessionid) {
+  if (!sessionid) return
+  void avatarFetch(`${LIVETALKING_BASE}/api/session/close`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sessionid }),
+    keepalive: true,
+  }).catch(() => {})
+}
+
 const formatDuration = totalSeconds => {
   const safe = Math.max(0, Math.ceil(totalSeconds || 0))
   return `${String(Math.floor(safe / 60)).padStart(2, '0')}:${String(safe % 60).padStart(2, '0')}`
 }
 
-async function postControlWithRetry(path, body, attempts = 10) {
+async function postControlWithRetry(path, body, attempts = 10, shouldContinue = () => true) {
   let lastReason = null
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    if (!shouldContinue()) throw new Error('预约时段已结束')
     try {
       return await api(path, { method: 'POST', body: JSON.stringify(body) })
     } catch (reason) {
@@ -219,7 +230,7 @@ export function ReportView({ report, messages = [], interviewId = null, onExit }
   </section>
 }
 
-export default function InterviewRoom({ resume, existingInterview = null, mediaStream, policy = null, onExit }) {
+export default function InterviewRoom({ resume, existingInterview = null, mediaStream, policy = null, appointment = null, appointmentNow = Date.now, onExit }) {
   const candidateVideoRef = useRef(null)
   const candidateMobileVideoRef = useRef(null)
   const avatarVideoRef = useRef(null)
@@ -229,6 +240,7 @@ export default function InterviewRoom({ resume, existingInterview = null, mediaS
   const smile = useSmileAction({ coordinator: actionCoordinator })
   const { play: playSmile, stop: stopSmile, configure: configureSmile } = smile
   const peerRef = useRef(null)
+  const avatarConnectionRef = useRef(null)
   const sessionRef = useRef('')
   const audioContextRef = useRef(null)
   const audioSourceRef = useRef(null)
@@ -268,8 +280,10 @@ export default function InterviewRoom({ resume, existingInterview = null, mediaS
   const startingRef = useRef(false)
   const submittingRef = useRef(false)
   const finishingRef = useRef(false)
+  const reportStartedRef = useRef(false)
   const exitingRef = useRef(false)
   const operationGenerationRef = useRef(0)
+  const appointmentExpiredRef = useRef(false)
   const behaviorMetricsRef = useRef({
     samples: 0, faceFrames: 0, centeredFrames: 0, headAwayFrames: 0,
     highMovementFrames: 0, blinkCount: 0, blinkActive: false, previousNose: null,
@@ -284,6 +298,15 @@ export default function InterviewRoom({ resume, existingInterview = null, mediaS
   const [transcript, setTranscript] = useState('')
   const [questionCount, setQuestionCount] = useState(0)
   const [elapsed, setElapsed] = useState(0)
+  const appointmentEnd = Date.parse(appointment?.ends_at || '')
+  const hasAppointmentTime = appointment?.status === 'checked_in' && Number.isFinite(appointmentEnd)
+  const reportOnly = existingInterview?.status === 'ready_to_finish'
+  const canStream = Boolean(mediaStream && hasAppointmentTime && !reportOnly)
+  const [appointmentRemaining, setAppointmentRemaining] = useState(() => hasAppointmentTime
+    ? Math.max(0, Math.ceil((appointmentEnd - appointmentNow()) / 1000)) : null)
+  const timeIsOver = useCallback(() => appointmentExpiredRef.current
+    || (hasAppointmentTime && appointmentNow() >= appointmentEnd), [hasAppointmentTime, appointmentNow, appointmentEnd])
+  const canResolveCorrection = !reportOnly || (hasAppointmentTime && appointmentRemaining > 0)
   const [avatarStatus, setAvatarStatus] = useState('连接中')
   const [interviewerPresent, setInterviewerPresent] = useState(false)
   const [error, setError] = useState('')
@@ -333,17 +356,10 @@ export default function InterviewRoom({ resume, existingInterview = null, mediaS
     audioContextRef.current = null
     speechTurnRef.current += 1
     window.speechSynthesis?.cancel()
-    const avatarSessionId = sessionRef.current
-    if (avatarSessionId) {
-      avatarFetch(`${LIVETALKING_BASE}/api/session/close`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sessionid: avatarSessionId }),
-        keepalive: true,
-      }).catch(() => {})
-    }
+    closeAvatarSession(sessionRef.current)
     peerRef.current?.close()
     peerRef.current = null
+    avatarConnectionRef.current = null
     sessionRef.current = ''
   }, [stopAcknowledgment, stopOpening, actionCoordinator])
 
@@ -358,6 +374,7 @@ export default function InterviewRoom({ resume, existingInterview = null, mediaS
     if (candidateVideoRef.current && mediaStream) candidateVideoRef.current.srcObject = mediaStream
     if (candidateMobileVideoRef.current && mediaStream) candidateMobileVideoRef.current.srcObject = mediaStream
     const handleTrackEnded = () => {
+      if (appointmentExpiredRef.current) return
       setError('摄像头或麦克风连接已中断，请保存当前录像并返回设备检测。')
       setPhase(current => ['report', 'reporting'].includes(current) ? current : 'device-lost')
       cancelInteractiveWork()
@@ -383,17 +400,9 @@ export default function InterviewRoom({ resume, existingInterview = null, mediaS
   }, [cancelInteractiveWork, mediaStream])
 
   useEffect(() => {
-    if (!interview || report) return undefined
+    if (!interview || report || ['slot-saving', 'slot-expired'].includes(phase)) return undefined
     const warnBeforeUnload = event => {
-      const avatarSessionId = sessionRef.current
-      if (avatarSessionId) {
-        avatarFetch(`${LIVETALKING_BASE}/api/session/close`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ sessionid: avatarSessionId }),
-          keepalive: true,
-        }).catch(() => {})
-      }
+      closeAvatarSession(sessionRef.current)
       if (interruptionSessionIdRef.current && interruptionSessionTokenRef.current && !['paused', 'can-finish', 'reporting', 'report-failed', 'pause-expired', 'invalid-ended'].includes(phase)) {
         apiKeepalive(`/interviews/${interview.id}/interruptions`, {
           session_id: interruptionSessionIdRef.current,
@@ -499,19 +508,25 @@ export default function InterviewRoom({ resume, existingInterview = null, mediaS
     setBehaviorStatus('已保存')
   }, [])
 
-  const connectAvatar = useCallback(async () => {
-    if (sessionRef.current && peerRef.current && peerRef.current.connectionState !== 'closed') return
+  const connectAvatar = useCallback(() => {
+    if (!canStream || timeIsOver()) return Promise.reject(new Error('预约时段已经结束或未签到'))
+    if (avatarConnectionRef.current) return avatarConnectionRef.current
+    if (sessionRef.current && peerRef.current && peerRef.current.connectionState !== 'closed') return Promise.resolve()
     setAvatarStatus('连接中')
     const pc = new RTCPeerConnection({ sdpSemantics: 'unified-plan' })
     peerRef.current = pc
-    try {
+    const isCurrent = () => peerRef.current === pc && !timeIsOver()
+    const attempt = (async () => {
+      try {
       pc.addTransceiver('video', { direction: 'recvonly' })
       pc.addTransceiver('audio', { direction: 'recvonly' })
       pc.addEventListener('track', event => {
+        if (!isCurrent()) return
         if (event.track.kind === 'video' && avatarVideoRef.current) avatarVideoRef.current.srcObject = event.streams[0]
         if (event.track.kind === 'audio' && avatarAudioRef.current) avatarAudioRef.current.srcObject = event.streams[0]
       })
       pc.addEventListener('connectionstatechange', () => {
+        if (!isCurrent()) return
         if (pc.connectionState === 'connected') setAvatarStatus('在线')
         if (['failed', 'disconnected'].includes(pc.connectionState)) setAvatarStatus('连接中断')
       })
@@ -533,6 +548,7 @@ export default function InterviewRoom({ resume, existingInterview = null, mediaS
           pc.addEventListener('icegatheringstatechange', listener)
         })
       }
+      if (!isCurrent()) throw new Error('数字人连接已取消')
       const response = await avatarFetch(`${LIVETALKING_BASE}/offer`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -545,23 +561,39 @@ export default function InterviewRoom({ resume, existingInterview = null, mediaS
       if (!response.ok) throw new Error('数字人视频连接失败')
       const answer = await response.json()
       if (!answer.sdp) throw new Error(answer.msg || '数字人视频连接失败')
+      if (!isCurrent()) {
+        closeAvatarSession(String(answer.sessionid || ''))
+        throw new Error('数字人连接已取消')
+      }
       sessionRef.current = String(answer.sessionid || '')
       await pc.setRemoteDescription({ type: 'answer', sdp: answer.sdp })
-    } catch (reason) {
-      pc.close()
-      if (peerRef.current === pc) peerRef.current = null
-      sessionRef.current = ''
-      throw reason
-    }
-  }, [])
+      } catch (reason) {
+        pc.close()
+        if (peerRef.current === pc) {
+          closeAvatarSession(sessionRef.current)
+          peerRef.current = null
+          sessionRef.current = ''
+        }
+        throw reason
+      }
+    })()
+    avatarConnectionRef.current = attempt
+    const clearAttempt = () => { if (avatarConnectionRef.current === attempt) avatarConnectionRef.current = null }
+    void attempt.then(clearAttempt, clearAttempt)
+    return attempt
+  }, [canStream, timeIsOver])
 
   useEffect(() => {
+    if (!canStream) {
+      setAvatarStatus(reportOnly ? '报告模式' : '未连接')
+      return undefined
+    }
     let active = true
     connectAvatar().catch(() => {
-      if (active) setAvatarStatus('真人数字人暂未连接')
+      if (active && !timeIsOver()) setAvatarStatus('真人数字人暂未连接')
     })
     return () => { active = false }
-  }, [connectAvatar])
+  }, [canStream, connectAvatar, reportOnly, timeIsOver])
 
   const avatarIsSpeaking = useCallback(async () => {
     const response = await avatarFetch(`${LIVETALKING_BASE}/is_speaking`, {
@@ -650,6 +682,7 @@ export default function InterviewRoom({ resume, existingInterview = null, mediaS
   }), [])
 
   const speak = useCallback(async (text, nextPhase = 'ready', spokenText = text) => {
+    if (timeIsOver()) return
     stopAcknowledgment()
     actionCoordinator.cancelAll()
     const speechLease = actionCoordinator.acquire({ owner: 'speech', priority: 100, cancel: () => {} })
@@ -659,7 +692,7 @@ export default function InterviewRoom({ resume, existingInterview = null, mediaS
     setQuestion(text)
     try {
       if (!sessionRef.current) await connectAvatar()
-      if (speechTurnRef.current !== turnId) return
+      if (speechTurnRef.current !== turnId || timeIsOver()) return
       const response = await avatarFetch(`${LIVETALKING_BASE}/human`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -669,15 +702,15 @@ export default function InterviewRoom({ resume, existingInterview = null, mediaS
       if (!response.ok) throw new Error('数字人播报请求失败')
       await waitForAvatarSpeechEnd(spokenText, turnId)
     } catch {
-      if (speechTurnRef.current !== turnId) return
+      if (speechTurnRef.current !== turnId || timeIsOver()) return
       setAvatarStatus('本地语音模式')
       setInterviewerPresent(true)
       await speakWithBrowser(spokenText, turnId)
     } finally { speechLease?.release() }
-    if (speechTurnRef.current === turnId) {
+    if (speechTurnRef.current === turnId && !timeIsOver()) {
       setPhase(current => current === 'speaking' ? nextPhase : current)
     }
-  }, [connectAvatar, speakWithBrowser, stopAcknowledgment, waitForAvatarSpeechEnd, actionCoordinator])
+  }, [connectAvatar, speakWithBrowser, stopAcknowledgment, waitForAvatarSpeechEnd, actionCoordinator, timeIsOver])
 
   const startElapsedClock = useCallback(() => {
     clearInterval(timerRef.current)
@@ -809,8 +842,44 @@ export default function InterviewRoom({ resume, existingInterview = null, mediaS
     recordingUploadedRef.current = true
   }, [uploadRecordingChunk])
 
+  useEffect(() => {
+    if (!hasAppointmentTime || report) return undefined
+    const update = () => {
+      const remaining = Math.max(0, Math.ceil((appointmentEnd - appointmentNow()) / 1000))
+      setAppointmentRemaining(remaining)
+      if (remaining || appointmentExpiredRef.current) return
+      appointmentExpiredRef.current = true
+      if (reportOnly || reportStartedRef.current) return
+      if (finishingRef.current || exitingRef.current) return
+      operationGenerationRef.current += 1
+      pauseActiveRef.current = false
+      clearInterval(timerRef.current)
+      clearInterval(pauseTimerRef.current)
+      setPauseDeadlineMs(0)
+      setAvatarStatus('预约已结束')
+      setQuestion('预约时间已到，本场不再接收新回答。已提交的问答仍可在历史记录中查看。')
+      setError('')
+      setPhase('slot-saving')
+      const id = interview?.id || existingInterview?.id
+      // Calling stop now queues the final MediaRecorder event before releasing tracks;
+      // this upload finishes separately and never calls the paid report endpoint.
+      const finalSave = id ? Promise.allSettled([stopRecordingAndUpload(id), stopBehaviorTrackingAndUpload(id)]) : Promise.resolve([])
+      releaseRealtimeResources()
+      void finalSave.then(results => {
+        if (results.some(result => result.status === 'rejected')) {
+          setError('部分录像或行为统计未能保存，已提交的问答不受影响。返回前可重试保存录像。')
+        }
+        setPhase('slot-expired')
+      })
+    }
+    update()
+    const tick = window.setInterval(update, 250)
+    window.addEventListener('focus', update)
+    return () => { window.clearInterval(tick); window.removeEventListener('focus', update) }
+  }, [appointmentEnd, appointmentNow, existingInterview?.id, hasAppointmentTime, interview?.id, releaseRealtimeResources, report, reportOnly, stopBehaviorTrackingAndUpload, stopRecordingAndUpload])
+
   const startInterview = async () => {
-    if (startingRef.current) return
+    if (startingRef.current || (!reportOnly && (!canStream || timeIsOver()))) return
     const operationGeneration = operationGenerationRef.current
     startingRef.current = true
     setError('')
@@ -948,7 +1017,7 @@ export default function InterviewRoom({ resume, existingInterview = null, mediaS
 
   const finishSpeech = useCallback(() => {
     const socket = asrSocketRef.current
-    if (finishingSpeechRef.current || !socket) return
+    if (finishingSpeechRef.current || !socket || timeIsOver()) return
     stopSmile()
     clearTimeout(asrMaxDurationRef.current)
     clearInterval(silenceMonitorRef.current)
@@ -985,9 +1054,10 @@ export default function InterviewRoom({ resume, existingInterview = null, mediaS
       setError('语音提交失败，请重新回答。')
       setPhase('ready')
     }
-  }, [stopAudioCapture, stopSmile])
+  }, [stopAudioCapture, stopSmile, timeIsOver])
 
   const submitTranscript = useCallback(async text => {
+    if (timeIsOver() || (reportOnly && !hasAppointmentTime)) return
     if (submittingRef.current) return
     const operationGeneration = operationGenerationRef.current
     submittingRef.current = true
@@ -1015,6 +1085,7 @@ export default function InterviewRoom({ resume, existingInterview = null, mediaS
         requestError = reason
         if (['network_error', 'timeout'].includes(reason.code)) {
           await sleep(500)
+          if (operationGenerationRef.current !== operationGeneration || timeIsOver()) return
           try {
             next = await api(`/interviews/${interview.id}/answers`, { method: 'POST', body })
             requestError = null
@@ -1072,7 +1143,12 @@ export default function InterviewRoom({ resume, existingInterview = null, mediaS
           { speaker: 'interviewer', kind: 'correction_prompt', content: next.question }])
         setQuestionCount(current => next.question_count ?? current)
         // No acknowledgment or reassurance: clarification is not approval.
-        await speak(next.question, next.should_finish ? (next.can_generate_report === false ? 'invalid-ended' : 'can-finish') : 'ready')
+        if (reportOnly) {
+          setQuestion(next.question)
+          setPhase('can-finish')
+        } else {
+          await speak(next.question, next.should_finish ? (next.can_generate_report === false ? 'invalid-ended' : 'can-finish') : 'ready')
+        }
         return
       }
       if (next.invalid_answer) {
@@ -1126,10 +1202,10 @@ export default function InterviewRoom({ resume, existingInterview = null, mediaS
     } finally {
       submittingRef.current = false
     }
-  }, [interview, messages, playAcknowledgment, speak, playSmile, stopSmile])
+  }, [hasAppointmentTime, interview, messages, playAcknowledgment, reportOnly, speak, playSmile, stopSmile, timeIsOver])
 
   const requestNoEffectiveInput = useCallback(async () => {
-    if (!interview || submittingRef.current) return
+    if (!interview || submittingRef.current || timeIsOver()) return
     const operationGeneration = operationGenerationRef.current
     submittingRef.current = true
     setTranscript('')
@@ -1139,11 +1215,12 @@ export default function InterviewRoom({ resume, existingInterview = null, mediaS
     try {
       let next
       try {
-        next = await postControlWithRetry(`/interviews/${interview.id}/no-input`, body, 4)
+        next = await postControlWithRetry(`/interviews/${interview.id}/no-input`, body, 4, () => !timeIsOver())
       } catch (reason) {
         if (!['network_error', 'timeout'].includes(reason.code)) throw reason
         await sleep(500)
-        next = await postControlWithRetry(`/interviews/${interview.id}/no-input`, body, 4)
+        if (operationGenerationRef.current !== operationGeneration || timeIsOver()) return
+        next = await postControlWithRetry(`/interviews/${interview.id}/no-input`, body, 4, () => !timeIsOver())
       }
       if (operationGenerationRef.current !== operationGeneration) return
       replyIntentRef.current = 'clarify'
@@ -1158,13 +1235,13 @@ export default function InterviewRoom({ resume, existingInterview = null, mediaS
     } finally {
       submittingRef.current = false
     }
-  }, [interview, speak])
+  }, [interview, speak, timeIsOver])
 
   useEffect(() => { transcriptHandlerRef.current = submitTranscript }, [submitTranscript])
   useEffect(() => { noInputHandlerRef.current = requestNoEffectiveInput }, [requestNoEffectiveInput])
 
   const beginListening = useCallback(async () => {
-    if (!mediaStream || phase !== 'ready') return
+    if (!mediaStream || phase !== 'ready' || timeIsOver()) return
     stopSmile()
     const operationGeneration = operationGenerationRef.current
     setError('')
@@ -1178,11 +1255,12 @@ export default function InterviewRoom({ resume, existingInterview = null, mediaS
     try {
       socket = await avatarSocket(socketUrl)
     } catch (reason) {
+      if (operationGenerationRef.current !== operationGeneration || timeIsOver()) return
       setError(reason.message)
       setPhase('ready')
       return
     }
-    if (operationGenerationRef.current !== operationGeneration) { socket.close(); return }
+    if (operationGenerationRef.current !== operationGeneration || timeIsOver()) { socket.close(); return }
     socket.binaryType = 'arraybuffer'
     asrSocketRef.current = socket
 
@@ -1190,6 +1268,7 @@ export default function InterviewRoom({ resume, existingInterview = null, mediaS
       if (
         asrSocketRef.current !== socket
         || operationGenerationRef.current !== operationGeneration
+        || timeIsOver()
       ) return
       stopSmile()
       clearTimeout(asrTimeoutRef.current)
@@ -1228,10 +1307,10 @@ export default function InterviewRoom({ resume, existingInterview = null, mediaS
         socket.addEventListener('error', failed, { once: true })
         socket.addEventListener('close', closed, { once: true })
       })
-      if (asrSocketRef.current !== socket) return
+      if (asrSocketRef.current !== socket || timeIsOver()) return
 
       socket.onmessage = event => {
-        if (asrSocketRef.current !== socket || operationGenerationRef.current !== operationGeneration) return
+        if (asrSocketRef.current !== socket || operationGenerationRef.current !== operationGeneration || timeIsOver()) return
         stopSmile()
         clearTimeout(asrTimeoutRef.current)
         clearTimeout(asrMaxDurationRef.current)
@@ -1378,12 +1457,12 @@ export default function InterviewRoom({ resume, existingInterview = null, mediaS
     } catch (reason) {
       fail(`${reason.message}，请确认 LiveTalking 服务已启动。`)
     }
-  }, [finishSpeech, mediaStream, phase, stopAudioCapture, playSmile, stopSmile, actionCoordinator, questionCount, messages])
+  }, [finishSpeech, mediaStream, phase, stopAudioCapture, playSmile, stopSmile, actionCoordinator, questionCount, messages, timeIsOver])
 
   const requestPause = useCallback(async () => {
-    if (!interview || pauseUsed || pauseRequestPendingRef.current || resumeRequestPendingRef.current) return
+    if (!interview || pauseUsed || pauseRequestPendingRef.current || resumeRequestPendingRef.current || timeIsOver()) return
     pauseRequestPendingRef.current = true
-    operationGenerationRef.current += 1
+    const operationGeneration = ++operationGenerationRef.current
     pauseActiveRef.current = true
     clearInterval(timerRef.current)
     timerRef.current = null
@@ -1400,7 +1479,8 @@ export default function InterviewRoom({ resume, existingInterview = null, mediaS
     setPhase('pausing')
     const body = { request_id: createRequestId() }
     try {
-      const result = await postControlWithRetry(`/interviews/${interview.id}/pause`, body)
+      const result = await postControlWithRetry(`/interviews/${interview.id}/pause`, body, 10, () => !timeIsOver())
+      if (operationGenerationRef.current !== operationGeneration || timeIsOver()) return
       const remaining = Math.max(0, Number(result.pause_remaining_seconds || result.pause_max_seconds || 0))
       setPauseUsed(true)
       setPauseRemaining(remaining)
@@ -1408,14 +1488,17 @@ export default function InterviewRoom({ resume, existingInterview = null, mediaS
       setPauseNotice(result.notice)
       try {
         const record = await api(`/interviews/${interview.id}`)
+        if (operationGenerationRef.current !== operationGeneration || timeIsOver()) return
         setMessages(record.messages || [])
         setCorrection(record.pending_correction || record.corrections?.at(-1) || null)
         setQuestionCount((record.messages || []).filter(item => item.speaker === 'interviewer' && (item.kind || 'question') === 'question').length)
       } catch {
+        if (operationGenerationRef.current !== operationGeneration || timeIsOver()) return
         setMessages(items => [...items, { speaker: 'interviewer', kind: 'pause_notice', content: result.notice }])
       }
       await speak(result.notice, 'paused')
     } catch (reason) {
+      if (operationGenerationRef.current !== operationGeneration || timeIsOver()) return
       pauseActiveRef.current = false
       try {
         if (recorderRef.current?.state === 'paused') recorderRef.current.resume()
@@ -1428,18 +1511,18 @@ export default function InterviewRoom({ resume, existingInterview = null, mediaS
     } finally {
       pauseRequestPendingRef.current = false
     }
-  }, [cancelInteractiveWork, interview, pauseUsed, speak, startElapsedClock])
+  }, [cancelInteractiveWork, interview, pauseUsed, speak, startElapsedClock, timeIsOver])
 
   const requestResume = useCallback(async (automaticExpiry = false) => {
-    if (!interview || resumeRequestPendingRef.current) return
+    if (!interview || resumeRequestPendingRef.current || timeIsOver()) return
     resumeRequestPendingRef.current = true
     const operationGeneration = operationGenerationRef.current
     setError('')
     setPhase(automaticExpiry ? 'pause-expiring' : 'resuming')
     const body = { request_id: createRequestId() }
     try {
-      const result = await postControlWithRetry(`/interviews/${interview.id}/resume`, body, 5)
-      if (operationGenerationRef.current !== operationGeneration) return
+      const result = await postControlWithRetry(`/interviews/${interview.id}/resume`, body, 5, () => !timeIsOver())
+      if (operationGenerationRef.current !== operationGeneration || timeIsOver()) return
       pauseActiveRef.current = false
       clearInterval(pauseTimerRef.current)
       pauseTimerRef.current = null
@@ -1450,19 +1533,23 @@ export default function InterviewRoom({ resume, existingInterview = null, mediaS
       let record = null
       try {
         record = await api(`/interviews/${interview.id}`)
+        if (operationGenerationRef.current !== operationGeneration || timeIsOver()) return
         setMessages(record.messages || [])
         setCorrection(record.pending_correction || record.corrections?.at(-1) || null)
         setQuestionCount((record.messages || []).filter(item => item.speaker === 'interviewer' && (item.kind || 'question') === 'question').length)
       } catch {
+        if (operationGenerationRef.current !== operationGeneration || timeIsOver()) return
         setMessages(items => [...items, { speaker: 'interviewer', kind: result.expired ? 'closing' : 'transition', content: result.transition }])
       }
       setQuestion(result.transition)
 
       if (result.expired) {
+        cancelInteractiveWork()
         await Promise.allSettled([
           stopRecordingAndUpload(interview.id),
           stopBehaviorTrackingAndUpload(interview.id),
         ])
+        if (operationGenerationRef.current !== operationGeneration || timeIsOver()) return
         releaseRealtimeResources()
         setPhase(result.can_generate_report ? 'can-finish' : 'pause-expired')
         return
@@ -1480,6 +1567,7 @@ export default function InterviewRoom({ resume, existingInterview = null, mediaS
       if (operationGenerationRef.current !== operationGeneration) return
       await speak(result.transition, 'ready')
     } catch (reason) {
+      if (operationGenerationRef.current !== operationGeneration || timeIsOver()) return
       setError(`继续面试失败：${reason.message}`)
       setPhase('paused')
       if (automaticExpiry) {
@@ -1488,7 +1576,7 @@ export default function InterviewRoom({ resume, existingInterview = null, mediaS
     } finally {
       resumeRequestPendingRef.current = false
     }
-  }, [interview, releaseRealtimeResources, speak, startBehaviorTracking, startElapsedClock, startRecording, stopBehaviorTrackingAndUpload, stopRecordingAndUpload, playSmile])
+  }, [cancelInteractiveWork, interview, releaseRealtimeResources, speak, startBehaviorTracking, startElapsedClock, startRecording, stopBehaviorTrackingAndUpload, stopRecordingAndUpload, playSmile, timeIsOver])
 
   useEffect(() => { resumeHandlerRef.current = requestResume }, [requestResume])
   useEffect(() => {
@@ -1509,8 +1597,8 @@ export default function InterviewRoom({ resume, existingInterview = null, mediaS
   }, [pauseDeadlineMs])
 
   const finishInterview = async () => {
-    if (!interview || finishingRef.current) return
-    if (correction?.status === 'pending') {
+    if (!interview || finishingRef.current || (!reportOnly && phase !== 'report-failed' && timeIsOver())) return
+    if (correction?.status === 'pending' && canResolveCorrection) {
       setError('请先确认这处更正，或选择保留原回答，再生成报告。')
       return
     }
@@ -1519,7 +1607,8 @@ export default function InterviewRoom({ resume, existingInterview = null, mediaS
       return
     }
     finishingRef.current = true
-    stopSmile()
+    reportStartedRef.current = true
+    cancelInteractiveWork()
     setPhase('reporting')
     setError('')
     clearInterval(timerRef.current)
@@ -1527,6 +1616,7 @@ export default function InterviewRoom({ resume, existingInterview = null, mediaS
     let recordingTask = Promise.resolve(null)
     try {
       recordingTask = stopRecordingAndUpload(interview.id).then(() => null, reason => reason)
+      mediaStream?.getTracks().forEach(track => track.stop())
       const behaviorError = await stopBehaviorTrackingAndUpload(interview.id).then(() => null, reason => reason)
       const result = await api(`/interviews/${interview.id}/finish`, { method: 'POST' })
       try {
@@ -1558,15 +1648,16 @@ export default function InterviewRoom({ resume, existingInterview = null, mediaS
 
   const minutes = String(Math.floor(elapsed / 60)).padStart(2, '0')
   const seconds = String(elapsed % 60).padStart(2, '0')
-  const busy = ['starting', 'speaking', 'acknowledging', 'connecting-asr', 'transcribing', 'thinking', 'reporting', 'exiting', 'pausing', 'resuming', 'pause-expiring'].includes(phase)
-  const canFinish = Boolean(interview) && correction?.status !== 'pending' && ['ready', 'can-finish', 'report-failed'].includes(phase)
+  const busy = ['starting', 'speaking', 'acknowledging', 'connecting-asr', 'transcribing', 'thinking', 'reporting', 'exiting', 'pausing', 'resuming', 'pause-expiring', 'slot-saving'].includes(phase)
+  const canFinish = Boolean(interview) && (correction?.status !== 'pending' || !canResolveCorrection) && ['ready', 'can-finish', 'report-failed'].includes(phase)
   const requestExit = async () => {
-    if (exitingRef.current || finishingRef.current) return
+    if (exitingRef.current || finishingRef.current || phase === 'slot-saving') return
     if (!interview || report) {
       onExit()
       return
     }
-    if (phase !== 'exit-save-failed' && !window.confirm('退出前会先保存已录制内容；未提交的当前回答仍会丢失。确认退出吗？')) return
+    const afterDeadline = timeIsOver()
+    if (!afterDeadline && phase !== 'exit-save-failed' && !window.confirm('退出前会先保存已录制内容；未提交的当前回答仍会丢失。确认退出吗？')) return
 
     operationGenerationRef.current += 1
     exitingRef.current = true
@@ -1579,7 +1670,7 @@ export default function InterviewRoom({ resume, existingInterview = null, mediaS
     timerRef.current = null
     try {
       await stopRecordingAndUpload(interview.id)
-      if (interruptionSessionIdRef.current && interruptionSessionTokenRef.current && !['paused', 'can-finish', 'reporting', 'report-failed', 'pause-expired', 'invalid-ended'].includes(phase)) {
+      if (!afterDeadline && !timeIsOver() && interruptionSessionIdRef.current && interruptionSessionTokenRef.current && !['paused', 'can-finish', 'reporting', 'report-failed', 'pause-expired', 'invalid-ended'].includes(phase)) {
         try {
           await api(`/interviews/${interview.id}/interruptions`, {
             method: 'POST',
@@ -1607,18 +1698,18 @@ export default function InterviewRoom({ resume, existingInterview = null, mediaS
 
   return <section className="interview-room">
     <header className="room-header">
-      <button className="back-link" onClick={requestExit}><ArrowLeft />{phase === 'exit-save-failed' ? '重试保存并退出' : '退出面试室'}</button>
+      <button className="back-link" disabled={phase === 'slot-saving'} onClick={requestExit}><ArrowLeft />{phase === 'exit-save-failed' ? '重试保存并退出' : '退出面试室'}</button>
       <div className="room-title"><span className="live-dot" /><b>AI 数字人模拟面试</b><small>{targetRole || '综合岗位探索'}</small></div>
       <div className="room-header-actions">
         {interview && <button
           className={`pause-trigger ${pauseUsed ? 'used' : ''} ${pauseDeadlineMs ? 'active' : ''}`}
-          disabled={pauseUsed && !pauseDeadlineMs || ['pausing', 'resuming', 'pause-expiring', 'can-finish', 'invalid-ended', 'pause-expired', 'reporting', 'exiting'].includes(phase)}
+          disabled={pauseUsed && !pauseDeadlineMs || ['pausing', 'resuming', 'pause-expiring', 'can-finish', 'invalid-ended', 'pause-expired', 'reporting', 'report-failed', 'exiting', 'slot-saving', 'slot-expired'].includes(phase) || reportOnly}
           onClick={pauseDeadlineMs ? () => requestResume(false) : requestPause}
         >
           {pauseDeadlineMs ? <PlayCircle /> : <PauseCircle />}
           {pauseDeadlineMs ? '继续面试' : pauseUsed ? '已用尽暂停次数，请专心面试' : '有急事，暂停一次'}
         </button>}
-        <div className="room-clock"><Clock3 />{minutes}:{seconds}</div>
+        <div className="room-clock"><Clock3 />{hasAppointmentTime ? `剩余 ${formatDuration(appointmentRemaining)}` : `${minutes}:${seconds}`}</div>
       </div>
     </header>
 
@@ -1648,13 +1739,18 @@ export default function InterviewRoom({ resume, existingInterview = null, mediaS
           <video ref={candidateMobileVideoRef} autoPlay muted playsInline />
           <span><Camera />你的镜头</span>
         </div>
-        {phase === 'setup' && <div className="setup-card">
+        {phase === 'setup' && reportOnly && <div className="setup-card">
+          <p className="eyebrow">面试记录</p><h1>准备生成成长报告</h1><p>面试已结束。整理报告不会开启摄像头、麦克风或数字人。</p>
+          <button className="primary wide" onClick={startInterview}><FileText />读取已保存的问答</button>
+        </div>}
+        {phase === 'setup' && !reportOnly && <div className="setup-card">
           <p className="eyebrow">最后一项设置</p>
           <h1>想练习哪个岗位？</h1>
           <p>可以输入岗位名称，也可以直接粘贴完整岗位 JD。面试官会按职责和任职要求定向追问，报告中给出岗位匹配度；留空则结合简历探索方向。</p>
           <textarea className="job-target-input" rows={7} maxLength={12000} value={targetRole} onChange={event => setTargetRole(event.target.value)} placeholder={'例如：产品经理\n\n或直接粘贴岗位 JD：\n岗位职责：负责用户调研、需求分析……\n任职要求：熟悉数据分析，具备项目协作经验……（选填）'} />
           <div className="interview-policy"><ShieldCheck /><div><b>开始前请了解</b><span>回答时若长时间没有持续有效表达，系统会显示 5 秒倒计时并自动结束本轮；短促咳嗽或环境声不会延长等待。</span><span><strong className="pause-location">位置：进入面试后页面右上角</strong>临时有事请优先使用“有急事，暂停一次”，每场一次，最长保留 {policyPauseMinutes} 分钟。</span><span>请勿直接关闭网页或反复强制退出。{policyWindowHours} 小时内前 {policyWarningCount} 次只提醒，第 {policyThreshold} 次将冷却 {policyCooldownMinutes} 分钟；偶发断网或设备断开不计入。</span><span>点击开始后，面试官会先口头说明以上规则，再提出第一题。</span></div></div>
-          <button className="primary wide" disabled={phase === 'starting'} onClick={startInterview}><Sparkles />{existingInterview ? '继续这场面试' : '开始模拟面试'}</button>
+          {hasAppointmentTime && <p>签到后开始计时，倒计时包含准备与暂停时间。</p>}
+          <button className="primary wide" disabled={!canStream || appointmentRemaining === 0} onClick={startInterview}><Sparkles />{existingInterview ? '继续这场面试' : '开始模拟面试'}</button>
         </div>}
         {phase !== 'setup' && !pauseDeadlineMs && !opening.busy && <div className="question-card">
           <>
@@ -1676,13 +1772,14 @@ export default function InterviewRoom({ resume, existingInterview = null, mediaS
           <span><Camera />你的镜头 · 行为统计{behaviorStatus}</span>
         </div>
         <div className={`voice-state ${phase}`} role="status" aria-live="polite">
-          {phase === 'listening' ? <Mic /> : ['ready', 'can-finish', 'answer-retry', 'report-failed', 'device-lost', 'exit-save-failed', 'paused', 'pause-expired', 'invalid-ended'].includes(phase) ? <MicOff /> : <LoaderCircle className={busy ? 'spin' : ''} />}
+          {phase === 'listening' ? <Mic /> : ['ready', 'can-finish', 'answer-retry', 'report-failed', 'device-lost', 'exit-save-failed', 'paused', 'pause-expired', 'invalid-ended', 'slot-expired'].includes(phase) ? <MicOff /> : <LoaderCircle className={busy ? 'spin' : ''} />}
           <div>
-            <b>{phase === 'starting' ? (opening.busy ? '面试官正在介绍规则' : '正在准备面试连接与问题') : phase === 'listening' ? '正在聆听你的回答' : phase === 'connecting-asr' ? '正在连接本地语音识别' : phase === 'speaking' ? pauseDeadlineMs ? '面试官正在说明暂停规则' : '请听面试官提问' : phase === 'acknowledging' ? '面试官正在承接你的回答' : phase === 'transcribing' ? '正在本地识别语音' : phase === 'thinking' ? '受控面试 Agent 正在判断追问策略' : phase === 'reporting' ? '正在生成成长报告' : phase === 'report-failed' ? '采集已结束，请重试生成报告' : phase === 'answer-retry' ? '上次回答结果待确认' : phase === 'device-lost' ? '设备连接已中断' : phase === 'exiting' ? '正在保存录像后退出' : phase === 'exit-save-failed' ? '录像尚未保存，请重试退出' : phase === 'paused' ? '面试已暂停' : phase === 'pausing' ? '正在启用本场唯一一次暂停' : phase === 'resuming' ? '正在承接上次对话' : phase === 'pause-expiring' ? '暂停时间已到，正在保存记录' : phase === 'pause-expired' ? '本场面试已因暂停超时结束' : phase === 'invalid-ended' ? '连续多次没有收到有效回答' : phase === 'can-finish' ? '面试题目已完成' : '可以开始回答'}</b>
+            <b>{phase === 'slot-saving' ? '预约已到时，正在保存录像和记录' : phase === 'slot-expired' ? '预约时限已结束' : phase === 'starting' ? (reportOnly ? '正在读取已保存的问答' : opening.busy ? '面试官正在介绍规则' : '正在准备面试连接与问题') : phase === 'listening' ? '正在聆听你的回答' : phase === 'connecting-asr' ? '正在连接本地语音识别' : phase === 'speaking' ? pauseDeadlineMs ? '面试官正在说明暂停规则' : '请听面试官提问' : phase === 'acknowledging' ? '面试官正在承接你的回答' : phase === 'transcribing' ? '正在本地识别语音' : phase === 'thinking' ? '受控面试 Agent 正在判断追问策略' : phase === 'reporting' ? '正在生成成长报告' : phase === 'report-failed' ? '采集已结束，请重试生成报告' : phase === 'answer-retry' ? '上次回答结果待确认' : phase === 'device-lost' ? '设备连接已中断' : phase === 'exiting' ? '正在保存录像后退出' : phase === 'exit-save-failed' ? '录像尚未保存，请重试退出' : phase === 'paused' ? '面试已暂停' : phase === 'pausing' ? '正在启用本场唯一一次暂停' : phase === 'resuming' ? '正在承接上次对话' : phase === 'pause-expiring' ? '暂停时间已到，正在保存记录' : phase === 'pause-expired' ? '本场面试已因暂停超时结束' : phase === 'invalid-ended' ? '连续多次没有收到有效回答' : phase === 'can-finish' ? '面试题目已完成' : '可以开始回答'}</b>
             <span>{phase === 'listening' ? '可以自然停顿；长时间没有持续表达时会出现 5 秒自动结束倒计时' : ['speaking', 'acknowledging'].includes(phase) ? '面试官说完后，开始回答按钮才会出现' : phase === 'paused' ? `剩余 ${formatDuration(pauseRemaining)}；已有回答时会先简要总结，刚开场暂停则直接继续问题` : '尽量使用 STAR 结构，清楚说明行动和结果'}</span>
           </div>
         </div>
-        {correction && <section className={`answer-correction ${correction.status}`} aria-label="回答更正" aria-live="polite">
+        {reportOnly && correction?.status === 'pending' && !canResolveCorrection && <p>面试已超时，尚未确认的更正会保留原回答。</p>}
+        {correction && canResolveCorrection && !['slot-saving', 'slot-expired'].includes(phase) && <section className={`answer-correction ${correction.status}`} aria-label="回答更正" aria-live="polite">
           <b>{correction.status === 'pending' ? '我们先确认这处更正' : correction.status === 'confirmed' ? '更正已确认' : '已保留原回答'}</b>
           {correction.status === 'pending' ? <>
             <p>只修改你确认的部分，不会作废其他经历，也不增加正式题数。</p>
@@ -1694,7 +1791,7 @@ export default function InterviewRoom({ resume, existingInterview = null, mediaS
               {correction.can_confirm && <button className="primary" disabled={!['ready', 'can-finish', 'pause-expired', 'invalid-ended'].includes(phase)} onClick={() => submitTranscript('确认更正')}>确认更正</button>}
               <button disabled={!['ready', 'can-finish', 'pause-expired', 'invalid-ended'].includes(phase)} onClick={() => submitTranscript('保留原回答')}>保留原回答</button>
             </div>
-            <small>也可以语音确认或继续修改；面试官说完后可操作。</small>
+            {!reportOnly && <small>也可以语音确认或继续修改；面试官说完后可操作。</small>}
           </> : <p>{correction.status === 'confirmed' ? '后续追问、摘要和报告将使用更正后的内容；原话留在记录中供核对。' : '本次更正已取消，你之前的说法保持不变。'}</p>}
         </section>}
         {transcript && <div className="latest-transcript"><small>刚才的回答</small><p>{transcript}</p></div>}
@@ -1716,9 +1813,10 @@ export default function InterviewRoom({ resume, existingInterview = null, mediaS
           {phase === 'paused' && <button className="primary wide answer-button" onClick={() => requestResume(false)}><PlayCircle />我回来了，继续面试</button>}
           {phase === 'pause-expired' && <button className="primary wide answer-button" onClick={requestExit}><ArrowLeft />保存记录并返回工作台</button>}
           {phase === 'invalid-ended' && <button className="primary wide answer-button" onClick={requestExit}><ArrowLeft />保存记录并返回工作台</button>}
+          {phase === 'slot-expired' && <button className="primary wide answer-button" onClick={requestExit}><ArrowLeft />保存记录并返回工作台</button>}
           {phase === 'can-finish' && <div className="answer-waiting"><CheckCircle2 />所有题目已完成，请生成报告</div>}
           {phase === 'report-failed' && <div className="answer-waiting">问答与录像已封口，请重试生成报告</div>}
-          {!['setup', 'listening', 'ready', 'can-finish', 'answer-retry', 'report-failed', 'device-lost', 'exit-save-failed', 'paused', 'pause-expired', 'invalid-ended'].includes(phase) && <div className="answer-waiting">
+          {!['setup', 'listening', 'ready', 'can-finish', 'answer-retry', 'report-failed', 'device-lost', 'exit-save-failed', 'paused', 'pause-expired', 'invalid-ended', 'slot-saving', 'slot-expired'].includes(phase) && <div className="answer-waiting">
             {phase === 'speaking' ? <><Volume2 />请先听完面试官提问</> : phase === 'acknowledging' ? <><Volume2 />请听完承接回应</> : <><LoaderCircle className="spin" />正在准备下一轮</>}
           </div>}
           <button className="end-interview" disabled={!canFinish} onClick={finishInterview}><PhoneOff />{phase === 'report-failed' ? '重试生成报告' : '结束面试并生成报告'}</button>

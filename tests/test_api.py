@@ -52,6 +52,10 @@ def valid_agent_json(action: str = "follow_up", question: str = "请说明你如
 class ApiRegressionTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        # These pre-booking regressions isolate interview/report/recording logic.
+        cls.legacy_admission = patch.object(main, "APPOINTMENTS_REQUIRED", False)
+        cls.legacy_admission.start()
+        cls.addClassCleanup(cls.legacy_admission.stop)
         cls.temporary = tempfile.TemporaryDirectory()
         cls.temp_path = Path(cls.temporary.name)
         cls.upload_path = cls.temp_path / "uploads"

@@ -27,6 +27,7 @@ dependencies = [
     { name = "redis" },
     { name = "reportlab" },
     { name = "sqlalchemy" },
+    { name = "tzdata", marker = "sys_platform == 'win32'" },
     { name = "uvicorn", extra = ["standard"] },
 ]
 
@@ -48,6 +49,7 @@ requires-dist = [
     { name = "redis", specifier = ">=5.2.0" },
     { name = "reportlab", specifier = ">=4.2.0" },
     { name = "sqlalchemy", specifier = ">=2.0.0" },
+    { name = "tzdata", marker = "sys_platform == 'win32'" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30.0" },
 ]
 

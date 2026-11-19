@@ -36,6 +36,14 @@
     "target": "apps/server/app/admin_demo.py"
   },
   {
+    "source": "apps/server/app/appointments.py",
+    "target": "apps/server/app/appointments.py"
+  },
+  {
+    "source": "docs/appointment-scheduling.md",
+    "target": "docs/appointment-scheduling.md"
+  },
+  {
     "source": "tests/test_admin_demo.py",
     "target": "tests/test_admin_demo.py"
   },
@@ -114,6 +122,22 @@
   {
     "source": "apps/web/src/App.jsx",
     "target": "apps/web/src/App.jsx"
+  },
+  {
+    "source": "apps/web/src/AppointmentPanel.jsx",
+    "target": "apps/web/src/AppointmentPanel.jsx"
+  },
+  {
+    "source": "apps/web/src/appointmentPanel.css",
+    "target": "apps/web/src/appointmentPanel.css"
+  },
+  {
+    "source": "apps/web/src/appointmentPolicy.js",
+    "target": "apps/web/src/appointmentPolicy.js"
+  },
+  {
+    "source": "tests/appointment_ui.test.mjs",
+    "target": "tests/appointment_ui.test.mjs"
   },
   {
     "source": "apps/web/src/AuthDialog.jsx",
@@ -342,6 +366,14 @@
   {
     "source": "tests/test_api.py",
     "target": "tests/test_api.py"
+  },
+  {
+    "source": "tests/test_appointments.py",
+    "target": "tests/test_appointments.py"
+  },
+  {
+    "source": "tests/test_appointment_integration.py",
+    "target": "tests/test_appointment_integration.py"
   },
   {
     "source": "tests/test_avatar_cues.py",

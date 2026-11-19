@@ -1,0 +1,19 @@
+.appointment-panel { margin-bottom: 1.25rem; }
+.appointment-panel .eyebrow, .appointment-active b { display: flex; align-items: center; gap: .5rem; }
+.appointment-rules { margin: 0 0 .4rem; }
+.appointment-quota { font-size: .875rem; color: var(--muted, #4b5673); margin: .55rem 0; }
+.appointment-active { background: #eef3ff; padding: .9rem; border: 1px solid #d7e0f8; border-radius: .8rem; }
+.appointment-active p { margin: .55rem 0; }
+.appointment-actions { display: flex; flex-wrap: wrap; gap: .55rem; }
+.appointment-night { font-size: .75rem; font-weight: 600; border-radius: .65rem; background: #dfe5ff; color: #294f91; padding: .1rem .5rem; }
+.appointment-day { display: flex; align-items: center; gap: .75rem; margin-top: .75rem; }
+.appointment-day select { padding: .45rem .7rem; font: inherit; color: inherit; border: 1px solid #c5d4ef; border-radius: .55rem; background: #fff; }
+.appointment-slots { display: grid; grid-template-columns: repeat(auto-fit, minmax(92px, 1fr)); gap: .5rem; margin: .75rem 0; max-height: 245px; overflow-y: auto; padding: .25rem; }
+.appointment-slots button { appearance: none; background: #fff; color: #2f3e66; border: 1px solid #c5d4ef; border-radius: .6rem; padding: .55rem .35rem; min-height: 3.25rem; display: grid; justify-content: center; gap: .2rem; }
+.appointment-slots button[aria-pressed="true"] { background: #e6eeff; border-color: #4361c2; box-shadow: inset 0 0 0 1px #4361c2; }
+.appointment-slots button:disabled { opacity: .6; cursor: not-allowed; }
+.appointment-slots button small { font-size: .75rem; }
+.appointment-slots button:focus-visible, .appointment-day select:focus-visible { outline: 2px solid #3558c5; outline-offset: 2px; }
+.appointment-history-messages { text-align: left; width: min(100%, 45rem); margin: .75rem auto; padding-inline-start: 1.5rem; }
+.appointment-history-messages li { margin: .8rem 0; }
+.appointment-history-messages p { white-space: pre-wrap; overflow-wrap: anywhere; margin: .3rem 0 0; }

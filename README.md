@@ -14,6 +14,14 @@
 
 业务代码采用 MIT 许可。此仓库是**精简源码版，不是完整免配置安装包**：包含下方展示图，不包含作者密钥、真实账号、数据库、简历、录像、完整数字人运行素材、动作视频、模型权重或商业素材包。首次填写 Key 并不意味着数字人已经部署完成。
 
+## 本次更新：面试预约与夜间名额
+
+- 学生可预约、提前取消和改约。每 30 分钟一个名额，原预约超时未签到后可由其他账号限时补位。
+- 常规时段与夜间独立计数；默认夜间 00:00–07:00 每账号每日可签到 3 次，不占用常规额度。夜间时段和额度可配置，不涉及收费。
+- 正式面试须签到，单场最多 20 分钟；截止后端停止数字人和语音连接，保留已提交回答供复盘。
+
+[查看完整预约规则与部署说明](docs/appointment-scheduling.md)
+
 ## 数字人面试官
 
 ![数字人面试官：深蓝职业装，端坐办公室桌前](docs/images/interviewer-preview.png)
@@ -79,6 +87,8 @@
 ```text
 上传 / 填写简历 + 可选岗位 / JD
               ↓
+预约时段 → 设备检查 → 签到入场
+              ↓
 规则说明 → 面试提问 ↔ 用户回答 / 澄清 / 更正
               ↓
 面试结果 + 对话摘要 + 可执行改进建议
@@ -117,6 +127,7 @@ DeepSeek Key 不是会员资格或免费额度；真实面试可能计费。配�
 ```text
 python -m unittest discover -s tests -p "test_*.py"
 node --test tests/acknowledgment_player.test.mjs tests/smile_actions.test.mjs tests/opening_policy.test.mjs tests/admin_avatar_load.test.mjs
+node --test tests/appointment_ui.test.mjs tests/api_session.test.mjs
 python scripts/public_release.py
 python scripts/public_release.py --output <一个尚不存在的源码输出目录>
 python scripts/public_release.py --check-tree <待上传的精简源码目录>

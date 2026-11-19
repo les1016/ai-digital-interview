@@ -35,6 +35,8 @@ from starlette.concurrency import run_in_threadpool
 
 from .document_conversion import DocumentConversionError, convert_docx_to_pdf
 from .admin_demo import install_admin_demo_routes
+from .appointments import (appointment_for_interview, attach_interview, detach_interview,
+    end_admission, get_admission, init_appointments, install_appointment_routes, lock_booking)
 from .document_exports import build_export
 from .coordination import Coordinator, CoordinationUnavailable, LeaseLock
 from .avatar_cues import select_avatar_cue
@@ -54,6 +56,12 @@ DOCUMENT_DIR.mkdir(parents=True, exist_ok=True)
 DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite:///{DATA_DIR / 'ai_interview.db'}")
 APP_ENV = os.getenv("APP_ENV", "development").strip().lower()
 IS_PRODUCTION = APP_ENV == "production"
+# An internal seam for isolated regressions; no deployment flag can bypass booking.
+APPOINTMENTS_REQUIRED = True
+INTERVIEW_APPOINTMENT_TIMEZONE = os.getenv("INTERVIEW_APPOINTMENT_TIMEZONE", "Europe/London")
+INTERVIEW_APPOINTMENT_NIGHT_START_HOUR = int(os.getenv("INTERVIEW_APPOINTMENT_NIGHT_START_HOUR", "0"))
+INTERVIEW_APPOINTMENT_NIGHT_END_HOUR = int(os.getenv("INTERVIEW_APPOINTMENT_NIGHT_END_HOUR", "7"))
+INTERVIEW_APPOINTMENT_NIGHT_DAILY_LIMIT = int(os.getenv("INTERVIEW_APPOINTMENT_NIGHT_DAILY_LIMIT", "3"))
 coordinator = Coordinator.from_env()
 ALGORITHM = "HS256"
 MAX_RESUME_FILE_BYTES = 15 * 1024 * 1024
@@ -1204,6 +1212,34 @@ def owned_interview(interview_id: int, user: User, db: Session, *, allow_admin: 
         raise HTTPException(404, "面试记录不存在")
     return interview
 
+
+def appointment_is_open(appointment, now: datetime | None = None) -> bool:
+    return bool(appointment and appointment.status == "checked_in" and appointment.ends_at
+                and (now or utcnow_naive()) < appointment.ends_at)
+
+
+def require_interview_window(interview: Interview, db: Session):
+    if not APPOINTMENTS_REQUIRED:
+        return None
+    appointment = appointment_for_interview(db, interview.id)
+    if not appointment_is_open(appointment):
+        raise HTTPException(409, "本场预约的面试时间已结束，已保存的回答仍可用于生成报告")
+    return appointment
+
+
+def interview_window_status(interview: Interview, db: Session, *, has_answer: bool | None = None) -> str:
+    if not APPOINTMENTS_REQUIRED or interview.status not in {"active", "paused"}:
+        return interview.status
+    if appointment_is_open(appointment_for_interview(db, interview.id)):
+        return interview.status
+    if has_answer is None:
+        has_answer = bool(db.scalar(select(InterviewMessage.id).where(
+            InterviewMessage.interview_id == interview.id,
+            InterviewMessage.speaker == "candidate",
+            InterviewMessage.kind == "answer",
+        ).limit(1)))
+    return "ready_to_finish" if has_answer else "expired"
+
 def interview_transcript(interview_id: int, db: Session) -> list[InterviewMessage]:
     return list(db.scalars(
         select(InterviewMessage)
@@ -2208,6 +2244,12 @@ app = FastAPI(title="AI数字人面试 API", version="0.1.0")
 install_admin_demo_routes(
     app, admin_user, BASE_DIR / "apps/web/src/data/adminInterviewScript.json",
 )
+install_appointment_routes(
+    app, current_user, get_db, timezone_name=INTERVIEW_APPOINTMENT_TIMEZONE,
+    night_start_hour=INTERVIEW_APPOINTMENT_NIGHT_START_HOUR,
+    night_end_hour=INTERVIEW_APPOINTMENT_NIGHT_END_HOUR,
+    night_daily_limit=INTERVIEW_APPOINTMENT_NIGHT_DAILY_LIMIT,
+)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=configured_cors_origins(),
@@ -2291,6 +2333,7 @@ def setup_database():
         raise RuntimeError("Redis coordination health check failed")
     DATA_DIR.mkdir(exist_ok=True)
     Base.metadata.create_all(engine)
+    init_appointments(engine)
     ensure_sqlite_compat_schema(engine)
     with SessionLocal() as db:
         reconcile_recording_trash(db)
@@ -2363,11 +2406,26 @@ def login(payload: LoginPayload, request: Request, db: Session = Depends(get_db)
     return {"token": token_for(user), "user": {"id": user.id, "name": user.display_name, "role": user.role}}
 
 @app.post("/api/avatar/token")
-def avatar_ticket(user: User = Depends(current_user)):
+def avatar_ticket(preview: bool = False, user: User = Depends(current_user), db: Session = Depends(get_db)):
     now = datetime.now(timezone.utc)
+    scope = {}
+    expires = now + timedelta(seconds=120)
+    if preview:
+        if user.role != "admin":
+            raise HTTPException(403, "仅管理员可使用数字人预览")
+        scope["avatar_preview"] = True
+    elif APPOINTMENTS_REQUIRED:
+        appointment = get_admission(db, user.id, now.replace(tzinfo=None))
+        if not appointment:
+            raise HTTPException(403, "请先在预约时段签到，再进入数字人面试")
+        end = appointment.ends_at.replace(tzinfo=timezone.utc)
+        scope.update(appointment_id=appointment.id, appointment_until=int(end.timestamp()))
+        expires = min(now + timedelta(seconds=30), end)
+    else:
+        scope["avatar_unrestricted"] = True
     token = jwt.encode({"sub": str(user.id), "role": user.role, "purpose": "avatar",
-                        "iat": now, "exp": now + timedelta(seconds=120)}, JWT_SECRET, algorithm=ALGORITHM)
-    return {"token": token}
+                        "iat": now, "exp": expires, **scope}, JWT_SECRET, algorithm=ALGORITHM)
+    return {"token": token, "expires_at": expires.isoformat()}
 
 
 @app.get("/api/avatar/identity")
@@ -2382,7 +2440,16 @@ def avatar_identity(credentials: HTTPAuthorizationCredentials | None = Depends(s
             raise ValueError("Unknown user")
     except (AttributeError, jwt.PyJWTError, ValueError, TypeError):
         raise HTTPException(401, "数字人会话凭证无效或已过期")
-    return {"id": user.id, "role": user.role}
+    identity = {"id": user.id, "role": user.role}
+    if claims.get("avatar_preview") is True and user.role == "admin":
+        return {**identity, "avatar_preview": True}
+    if not APPOINTMENTS_REQUIRED and claims.get("avatar_unrestricted") is True:
+        return {**identity, "avatar_unrestricted": True}
+    appointment = get_admission(db, user.id)
+    if (not appointment or claims.get("appointment_id") != appointment.id
+            or claims.get("appointment_until") != int(appointment.ends_at.replace(tzinfo=timezone.utc).timestamp())):
+        raise HTTPException(403, "预约未签到或面试时间已结束")
+    return {**identity, "appointment_id": appointment.id, "appointment_until": claims["appointment_until"]}
 
 
 @app.get("/api/me")
@@ -2860,6 +2927,7 @@ def start_interview(payload: StartInterviewPayload, user: User = Depends(current
         )
         if previous:
             interview = db.get(Interview, previous.interview_id)
+            require_interview_window(interview, db)
             if (
                 interview.resume_id != payload.resume_id
                 or interview.target_role != payload.target_role
@@ -2883,20 +2951,25 @@ def start_interview(payload: StartInterviewPayload, user: User = Depends(current
         resume = db.get(Resume, payload.resume_id)
         if not resume or resume.user_id != user.id:
             raise HTTPException(404, "简历不存在")
+        appointment = get_admission(db, user.id) if APPOINTMENTS_REQUIRED else None
+        if APPOINTMENTS_REQUIRED and not appointment:
+            raise HTTPException(409, "请先在预约时段内签到，再开始面试")
+        if appointment and appointment.interview_id is not None:
+            raise HTTPException(409, "本场预约已开始，请从预约入口继续这场面试")
+        owner_id = user.id
+        appointment_id = appointment.id if appointment else None
         enforce_interview_cooldown(user.id, db)
-        unfinished = db.scalar(
+        unfinished = list(db.scalars(
             select(Interview)
             .where(
                 Interview.user_id == user.id,
                 Interview.status.in_(["active", "paused", "ready_to_finish"]),
             )
             .order_by(Interview.started_at.desc())
-        )
-        if unfinished:
-            raise HTTPException(
-                409,
-                f"你还有一场未完成的面试（记录 {unfinished.id}），请先从历史记录继续或删除后再开始新面试",
-            )
+        ))
+        for prior in unfinished:
+            if not APPOINTMENTS_REQUIRED or appointment_is_open(appointment_for_interview(db, prior.id)):
+                raise HTTPException(409, f"你还有一场未完成的面试（记录 {prior.id}），请先继续该场面试")
         question = deepseek_chat([
             {"role": "system", "content": INTERVIEWER_PROMPT},
             {
@@ -2910,14 +2983,24 @@ def start_interview(payload: StartInterviewPayload, user: User = Depends(current
         ], max_chars=MAX_QUESTION_RESPONSE_CHARS, max_tokens=600,
             user_id=user.id, operation="interview_start")
         question = INTERVIEW_PAUSE_BRIEFING + question
+        if APPOINTMENTS_REQUIRED:
+            # End any pre-provider read snapshot, then serialize the final admission
+            # check with writes. Never hold the booking mutex during a model call.
+            db.rollback()
+            lock_booking(db)
+            appointment = get_admission(db, owner_id)
+            if (not appointment or appointment.id != appointment_id or appointment.interview_id is not None):
+                raise HTTPException(409, "预约已过期或已开始，请返回预约页面刷新")
         interview = Interview(
-            user_id=user.id,
-            resume_id=resume.id,
+            user_id=owner_id,
+            resume_id=payload.resume_id,
             target_role=payload.target_role,
             job_description=payload.job_description,
         )
         db.add(interview)
         db.flush()
+        if appointment:
+            attach_interview(db, appointment, owner_id, interview.id)
         db.add(InterviewMessage(
             interview_id=interview.id,
             speaker="interviewer",
@@ -2955,6 +3038,7 @@ def open_interview_session(
 ):
     interview = owned_interview(interview_id, user, db)
     if interview.status in {"active", "paused"}:
+        require_interview_window(interview, db)
         enforce_interview_cooldown(user.id, db)
     question_override = None
     if interview.status == "active":
@@ -3008,7 +3092,8 @@ def record_interview_interruption(
         status_before = interruption_status(user.id, db)
         if status_before["cooldown_remaining_seconds"]:
             return {"recorded": False, "duplicate": False, "cooldown_active": True, **status_before}
-        if interview.status != "active" or payload.reason == "device_lost":
+        if (interview.status != "active" or payload.reason == "device_lost"
+                or (APPOINTMENTS_REQUIRED and not appointment_is_open(appointment_for_interview(db, interview.id)))):
             return {"recorded": False, "duplicate": False, "cooldown_active": False, **status_before}
         db.add(InterviewInterruption(
             user_id=user.id,
@@ -3094,6 +3179,7 @@ def submit_answer(interview_id: int, payload: AnswerPayload, user: User = Depend
         raise HTTPException(409, "上一项面试操作仍在处理中，请稍候")
     try:
         interview = owned_interview(interview_id, user, db)
+        appointment = require_interview_window(interview, db)
         previous = db.scalar(
             select(InterviewAnswerRequest).where(
                 InterviewAnswerRequest.interview_id == interview.id,
@@ -3184,16 +3270,26 @@ def submit_answer(interview_id: int, payload: AnswerPayload, user: User = Depend
                 logger.warning("Interview Agent decision validation failed: %s", type(exc).__name__)
                 decision = fallback_agent_decision(question_count)
 
+            expired_during_decision = appointment is not None and not appointment_is_open(appointment)
             db.add(incoming)
-            db.flush()
-            correction_result = handle_answer_correction(interview, incoming, decision, db)
-            if correction_result:
-                return save_correction_response(interview.id, payload, correction_result, db)
+            if not expired_during_decision:
+                db.flush()
+                correction_result = handle_answer_correction(interview, incoming, decision, db)
+                if correction_result:
+                    return save_correction_response(interview.id, payload, correction_result, db)
 
-            if decision.action == "finish" and question_count < INTERVIEW_MIN_QUESTIONS:
-                decision = fallback_agent_decision(question_count)
+                if decision.action == "finish" and question_count < INTERVIEW_MIN_QUESTIONS:
+                    decision = fallback_agent_decision(question_count)
 
-            if decision.action == "finish":
+            if expired_during_decision:
+                interview.status = "ready_to_finish"
+                result = {
+                    "should_finish": True,
+                    "question": "本场预约已到时，刚才提交的回答已保存。",
+                    "question_count": question_count,
+                    "agent_decision": {"action": "finish", "reason": "预约时间到期"},
+                }
+            elif decision.action == "finish":
                 interview.status = "ready_to_finish"
                 result = {
                     "should_finish": True,
@@ -3258,6 +3354,7 @@ def report_no_effective_input(
         raise HTTPException(409, "上一项面试操作仍在处理中，请稍候")
     try:
         interview = owned_interview(interview_id, user, db)
+        require_interview_window(interview, db)
         if previous := previous_control_response(interview.id, payload.request_id, "no-input", db):
             return previous
         if interview.status != "active":
@@ -3288,6 +3385,7 @@ def pause_interview(
         raise HTTPException(409, "上一项面试操作仍在处理中，请稍候")
     try:
         interview = owned_interview(interview_id, user, db)
+        appointment = require_interview_window(interview, db)
         if previous := previous_control_response(interview.id, payload.request_id, "pause", db):
             return previous
         if interview.pause_used:
@@ -3297,6 +3395,8 @@ def pause_interview(
 
         now = utcnow_naive()
         deadline = now + timedelta(seconds=INTERVIEW_PAUSE_MAX_SECONDS)
+        if appointment:
+            deadline = min(deadline, appointment.ends_at)
         minutes = max(1, INTERVIEW_PAUSE_MAX_SECONDS // 60)
         notice = (
             f"我先为你暂停。本场面试只有一次暂停机会，最长保留 {minutes} 分钟。"
@@ -3343,6 +3443,7 @@ def resume_interview(
         raise HTTPException(409, "上一项面试操作仍在处理中，请稍候")
     try:
         interview = owned_interview(interview_id, user, db)
+        require_interview_window(interview, db)
         if previous := previous_control_response(interview.id, payload.request_id, "resume", db):
             return previous
         if interview.status != "paused" or not interview.pause_used:
@@ -3645,7 +3746,9 @@ def finish_interview(interview_id: int, user: User = Depends(current_user), db: 
     try:
         interview = owned_interview(interview_id, user, db)
         existing = db.scalar(select(InterviewReport).where(InterviewReport.interview_id == interview.id))
-        if pending_correction(interview.id, db):
+        pending = pending_correction(interview.id, db)
+        window_closed = APPOINTMENTS_REQUIRED and not appointment_is_open(appointment_for_interview(db, interview.id))
+        if pending and not window_closed:
             raise HTTPException(409, "还有一处回答更正未确认，请先确认更正或选择保留原回答")
         if existing:
             existing_payload = ensure_conversation_summary(
@@ -3657,6 +3760,14 @@ def finish_interview(interview_id: int, user: User = Depends(current_user), db: 
         records = effective_transcript(interview.id, db)
         if not any(item.speaker == "candidate" for item in records):
             raise HTTPException(409, "至少完成一道面试题后才能生成报告")
+        if APPOINTMENTS_REQUIRED:
+            # Report production can take longer than the appointment. Seal the
+            # interactive interview first, and keep report retries available.
+            end_admission(db, interview.id)
+            if pending:
+                pending.status = "cancelled"
+            interview.status = "ready_to_finish"
+            db.commit()
         behavior = db.scalar(select(InterviewBehavior).where(InterviewBehavior.interview_id == interview.id))
         conversation = [
             {"speaker": item.speaker, "content": item.content}
@@ -3983,6 +4094,8 @@ def delete_interview(interview_id: int, user: User = Depends(current_user), db: 
                 raise HTTPException(409, "录像文件正在使用，尚未删除任何面试数据，请稍后重试") from exc
 
             try:
+                if APPOINTMENTS_REQUIRED:
+                    detach_interview(db, interview.id)
                 interruptions = db.scalars(select(InterviewInterruption).where(
                     InterviewInterruption.interview_id == interview.id
                 )).all()
@@ -4047,7 +4160,7 @@ def list_interviews(user: User = Depends(current_user), db: Session = Depends(ge
         "id": item.id,
         "resume_id": item.resume_id,
         "target_role": item.target_role,
-        "status": item.status,
+        "status": interview_window_status(item, db),
         **pause_state_payload(item),
         "started_at": item.started_at,
         "finished_at": item.finished_at,
@@ -4069,13 +4182,15 @@ def get_interview(interview_id: int, user: User = Depends(current_user), db: Ses
     return {
         "id": interview.id,
         "resume_id": interview.resume_id,
-        "status": interview.status,
+        "status": interview_window_status(interview, db, has_answer=any(
+            item.speaker == "candidate" and item.kind == "answer" for item in messages)),
         "target_role": interview.target_role,
         "job_description": interview.job_description,
         **pause_state_payload(interview),
         "messages": [{"id": item.id, "speaker": item.speaker, "kind": item.kind, "content": item.content, "created_at": item.created_at,
                       "effective_content": effective.get(item.id), "corrected": item.id in effective and effective[item.id] != item.content} for item in messages],
-        "pending_correction": correction_payload(pending_correction(interview.id, db)),
+        "pending_correction": correction_payload(pending_correction(interview.id, db))
+        if not APPOINTMENTS_REQUIRED or appointment_is_open(appointment_for_interview(db, interview.id)) else None,
         "corrections": [correction_payload(row) for row in correction_rows(interview.id, db)],
         "report": report_payload,
         "behavior": json.loads(behavior.payload_json) if behavior else None,
