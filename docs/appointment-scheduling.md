@@ -1,6 +1,6 @@
 # 面试预约与入场
 
-在学生工作台选择未来七天内的档位。预约不启动数字人。到时选择简历、通过设备检查并同意录制权限，才能签到入场。
+在学生工作台选择未来七天内的档位，默认按北京时间（UTC+8）显示。晚上仍可预约之后的任何有余量时段；想约今晚零点后的时段，请选择次日日期，或点击「查看最近夜间时段」跳到最近有余位的日期。快捷入口只切换日期，不会提交预约。到时选择简历、通过设备检查并同意录制权限，才能签到入场；仅预约不启动数字人。
 
 | 预约规则 | 默认值 |
 | --- | --- |
@@ -17,6 +17,6 @@
 ## 部署与边界
 
 - 重启 FastAPI 和 LiveTalking，并更新网页构建。FastAPI 启动时创建预约数据表；部署前照常备份数据库。旧记录保留，旧未预约面试不能跳过新入场规则。录制与报告保留独立的收尾入口。
-- `INTERVIEW_APPOINTMENT_TIMEZONE` 为 IANA 时区（默认 `Europe/London`）；`INTERVIEW_APPOINTMENT_NIGHT_START_HOUR`、`INTERVIEW_APPOINTMENT_NIGHT_END_HOUR`、`INTERVIEW_APPOINTMENT_NIGHT_DAILY_LIMIT` 可调整同一个当地日历日内的夜间窗口和额度。预约时刻以 UTC 存储，档位展示、昼夜分类和日额度按后端时区计算。改变时区或夜间窗口也会重新归类额度周期内的历史签到，建议避开营业档期修改。Windows 通过 `tzdata` 解析时区。
+- `INTERVIEW_APPOINTMENT_TIMEZONE` 为 IANA 时区（默认 `Asia/Shanghai`，北京时间）；如果旧部署的 `.env` 或启动环境已显式设置为其他时区，要改为 `Asia/Shanghai` 后重启服务。`INTERVIEW_APPOINTMENT_NIGHT_START_HOUR`、`INTERVIEW_APPOINTMENT_NIGHT_END_HOUR`、`INTERVIEW_APPOINTMENT_NIGHT_DAILY_LIMIT` 可调整同一个当地日历日内的夜间窗口和额度。预约时刻以 UTC 存储，不因时区变更而改动；档位展示、昼夜分类和日额度按后端时区计算。改变时区或夜间窗口也会重新归类额度周期内的历史签到，建议避开营业档期修改。Windows 通过 `tzdata` 解析时区。
 - 预约写入采用数据库事务互斥，SQLite 单机和 PostgreSQL 多进程走同一规则。预约凭证用于实际数字人/ASR 入场，同一预约为一个数字人视频会话；服务以服务器时钟关闭过期会话。现阶段按单推理实例运行，不能把每个推理节点自己的会话表当成跨节点调度系统。
 - 管理员预览使用单独签名用途；真实面试仍需预约。Windows/WSL 本机签名校验模式不查询实时数据库，网页正常结束会关闭会话；已签发的短期凭证可能在到期前剩余最多约 30 秒，不能延长原预约硬截止。集中鉴权模式会实时核查预约状态。

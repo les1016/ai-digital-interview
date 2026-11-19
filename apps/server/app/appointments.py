@@ -22,6 +22,7 @@ REFILL_GRACE = timedelta(minutes=10)
 MAX_INTERVIEW_DURATION = timedelta(minutes=20)
 BOOKING_HORIZON = timedelta(days=7)
 ROLLING_PERIOD = timedelta(days=7)
+DEFAULT_APPOINTMENT_TIMEZONE = "Asia/Shanghai"
 DAILY_LIMIT = 1
 ROLLING_LIMIT = 3
 BOOKED = "booked"
@@ -291,7 +292,7 @@ def _active_booking(db: Session, user_id: int, now: datetime) -> Appointment | N
 
 
 def install_appointment_routes(
-    app, current_user, get_db, *, timezone_name="Europe/London", clock=utc_now,
+    app, current_user, get_db, *, timezone_name=DEFAULT_APPOINTMENT_TIMEZONE, clock=utc_now,
     night_start_hour=0, night_end_hour=7, night_daily_limit=3,
 ):
     policy = QuotaPolicy(ZoneInfo(timezone_name), night_start_hour, night_end_hour, night_daily_limit)

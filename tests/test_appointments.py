@@ -26,7 +26,8 @@ class AppointmentTests(unittest.TestCase):
         self.addCleanup(self.engine.dispose)
         init_appointments(self.engine)
         self.now = datetime(2026, 11, 19, 9, 51)
-        self.client = self.make_client()
+        # Keep the established UTC-based fixtures on an explicit deployment override.
+        self.client = self.make_client(timezone_name="Europe/London")
 
     def make_client(self, **options):
         def get_db():
@@ -181,6 +182,50 @@ class AppointmentTests(unittest.TestCase):
         self.now = datetime(2026, 7, 6, 23, 0)
         self.assertEqual(self.calendar()["remaining_today"], 1)
 
+    def test_beijing_default_evening_can_book_next_day_midnight(self):
+        self.client = self.make_client()
+        self.now = datetime(2026, 11, 19, 15, 30)  # 23:30 in Beijing
+        calendar = self.calendar()
+        self.assertEqual(calendar["timezone"], "Asia/Shanghai")
+        by_start = {slot["start_at"]: slot for slot in calendar["slots"]}
+        self.assertFalse(by_start["2026-11-19T15:30:00Z"]["overnight"])
+        midnight = by_start["2026-11-19T16:00:00Z"]
+        self.assertTrue(midnight["available"])
+        self.assertTrue(midnight["overnight"])
+        reserved = self.book("2026-11-20T00:00:00+08:00")
+        self.assertEqual(reserved.status_code, 201, reserved.text)
+        row = reserved.json()
+        self.assertEqual(row["start_at"], "2026-11-19T16:00:00Z")
+        self.assertTrue(row["overnight"])
+        self.assertEqual(self.mutate(row["id"], "check-in").status_code, 409)
+        self.now = datetime(2026, 11, 19, 16)
+        started = self.mutate(row["id"], "check-in")
+        self.assertEqual(started.status_code, 200, started.text)
+        self.assertEqual(started.json()["ends_at"], "2026-11-19T16:20:00Z")
+
+    def test_beijing_default_daily_quotas_reset_at_16_utc(self):
+        self.client = self.make_client()
+        self._finish_at(datetime(2026, 11, 18, 16), overnight=True)  # 00:00 Beijing, 19 Nov
+        self._finish_at(datetime(2026, 11, 19, 15, 30), overnight=False)  # 23:30 on the same day
+        self.now = datetime(2026, 11, 19, 15, 59, 59)
+        before = self.calendar()
+        self.assertEqual(before["remaining_today"], 0)
+        self.assertEqual(before["overnight"]["remaining_today"], 2)
+        self.now += timedelta(seconds=1)
+        after = self.calendar()
+        self.assertEqual(after["remaining_today"], 1)
+        self.assertEqual(after["overnight"]["remaining_today"], 3)
+        self.assertEqual(after["remaining_7_days"], before["remaining_7_days"])
+
+    def test_beijing_default_night_ends_at_07_local_time(self):
+        self.client = self.make_client()
+        self.now = datetime(2026, 11, 19, 22, 25)
+        boundary = self.calendar()["slots"][:2]
+        self.assertEqual([(slot["start_at"], slot["overnight"]) for slot in boundary], [
+            ("2026-11-19T22:30:00Z", True),  # 06:30 Beijing next morning
+            ("2026-11-19T23:00:00Z", False),  # 07:00 Beijing next morning
+        ])
+
     def test_daily_barrier_and_rolling_window_boundary(self):
         for day in (19, 20, 21):
             self.now = datetime(2026, 11, day, 10)
@@ -249,14 +294,14 @@ class AppointmentTests(unittest.TestCase):
         self.assertEqual(self.calendar()["overnight"]["remaining_today"], 3)
 
     def test_fall_back_uses_two_distinct_utc_slots_on_one_local_quota_day(self):
-        self.client = self.make_client(night_daily_limit=2)
+        self.client = self.make_client(timezone_name="Europe/London", night_daily_limit=2)
         self._finish_at(datetime(2026, 10, 25, 0, 30), overnight=True)  # first local 01:30
         self._finish_at(datetime(2026, 10, 25, 1, 30), overnight=True)  # repeated local 01:30
         self.assertEqual(self.calendar()["overnight"]["remaining_today"], 0)
         self.assertEqual(self.book("2026-10-25T02:00Z").status_code, 409)
 
     def test_configurable_overnight_hours_and_validation(self):
-        self.client = self.make_client(night_start_hour=1, night_end_hour=5, night_daily_limit=2)
+        self.client = self.make_client(timezone_name="Europe/London", night_start_hour=1, night_end_hour=5, night_daily_limit=2)
         self.now = datetime(2026, 11, 19, 0, 28)
         calendar = self.calendar()
         self.assertEqual(calendar["overnight"], {"start_hour": 1, "end_hour": 5, "daily_limit": 2, "remaining_today": 2})

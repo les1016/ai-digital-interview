@@ -1,3 +1,9 @@
+export const DEFAULT_APPOINTMENT_TIME_ZONE = 'Asia/Shanghai'
+
+export function appointmentTimeZoneLabel(zone) {
+  return zone === DEFAULT_APPOINTMENT_TIME_ZONE ? '北京时间（UTC+8）' : zone
+}
+
 export function appointmentStage(appointment, now) {
   if (!appointment) return 'none'
   if (appointment.status === 'checked_in') {
@@ -13,4 +19,9 @@ export function appointmentStage(appointment, now) {
 
 export function availableAppointmentSlot(slot, now) {
   return Boolean(slot.available && Date.parse(slot.check_in_by) > now)
+}
+
+// The API lists slots chronologically; skip elapsed or fully booked nights.
+export function nextAvailableNightSlot(slots, now) {
+  return (slots || []).find(slot => slot.overnight && availableAppointmentSlot(slot, now))
 }

@@ -6,7 +6,8 @@
 .appointment-active p { margin: .55rem 0; }
 .appointment-actions { display: flex; flex-wrap: wrap; gap: .55rem; }
 .appointment-night { font-size: .75rem; font-weight: 600; border-radius: .65rem; background: #dfe5ff; color: #294f91; padding: .1rem .5rem; }
-.appointment-day { display: flex; align-items: center; gap: .75rem; margin-top: .75rem; }
+.appointment-calendar-tools { display: flex; flex-wrap: wrap; align-items: center; gap: .75rem; margin-top: .75rem; }
+.appointment-day { display: flex; align-items: center; gap: .75rem; }
 .appointment-day select { padding: .45rem .7rem; font: inherit; color: inherit; border: 1px solid #c5d4ef; border-radius: .55rem; background: #fff; }
 .appointment-slots { display: grid; grid-template-columns: repeat(auto-fit, minmax(92px, 1fr)); gap: .5rem; margin: .75rem 0; max-height: 245px; overflow-y: auto; padding: .25rem; }
 .appointment-slots button { appearance: none; background: #fff; color: #2f3e66; border: 1px solid #c5d4ef; border-radius: .6rem; padding: .55rem .35rem; min-height: 3.25rem; display: grid; justify-content: center; gap: .2rem; }

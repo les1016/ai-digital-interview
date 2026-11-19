@@ -35,7 +35,7 @@ from starlette.concurrency import run_in_threadpool
 
 from .document_conversion import DocumentConversionError, convert_docx_to_pdf
 from .admin_demo import install_admin_demo_routes
-from .appointments import (appointment_for_interview, attach_interview, detach_interview,
+from .appointments import (DEFAULT_APPOINTMENT_TIMEZONE, appointment_for_interview, attach_interview, detach_interview,
     end_admission, get_admission, init_appointments, install_appointment_routes, lock_booking)
 from .document_exports import build_export
 from .coordination import Coordinator, CoordinationUnavailable, LeaseLock
@@ -58,7 +58,7 @@ APP_ENV = os.getenv("APP_ENV", "development").strip().lower()
 IS_PRODUCTION = APP_ENV == "production"
 # An internal seam for isolated regressions; no deployment flag can bypass booking.
 APPOINTMENTS_REQUIRED = True
-INTERVIEW_APPOINTMENT_TIMEZONE = os.getenv("INTERVIEW_APPOINTMENT_TIMEZONE", "Europe/London")
+INTERVIEW_APPOINTMENT_TIMEZONE = os.getenv("INTERVIEW_APPOINTMENT_TIMEZONE", DEFAULT_APPOINTMENT_TIMEZONE)
 INTERVIEW_APPOINTMENT_NIGHT_START_HOUR = int(os.getenv("INTERVIEW_APPOINTMENT_NIGHT_START_HOUR", "0"))
 INTERVIEW_APPOINTMENT_NIGHT_END_HOUR = int(os.getenv("INTERVIEW_APPOINTMENT_NIGHT_END_HOUR", "7"))
 INTERVIEW_APPOINTMENT_NIGHT_DAILY_LIMIT = int(os.getenv("INTERVIEW_APPOINTMENT_NIGHT_DAILY_LIMIT", "3"))
