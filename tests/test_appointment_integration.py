@@ -136,6 +136,44 @@ class AppointmentIntegrationTests(unittest.TestCase):
             self.assertEqual(row.status, "finished")
             self.assertIsNotNone(row.started_at)
 
+    def test_naturally_expired_interview_can_finish_from_history_without_reopening(self):
+        appt = self.admission()
+        with patch.object(main, "deepseek_chat", return_value="请介绍一个虚构项目。"):
+            started = self.start()
+        self.assertEqual(started.status_code, 200, started.text)
+        iid = started.json()["id"]
+        with patch.object(main, "deepseek_chat", return_value=valid_agent_json()):
+            answered = self.answer(iid)
+        self.assertEqual(answered.status_code, 200, answered.text)
+
+        with self.Session() as db:
+            self.assertEqual(db.get(main.Interview, iid).status, "active")
+            db.get(Appointment, appt).ends_at = self.now - timedelta(seconds=1)
+            db.commit()
+
+        url = f"/api/interviews/{iid}"
+        history = self.client.get("/api/interviews", headers=self.headers)
+        self.assertEqual(history.status_code, 200, history.text)
+        self.assertEqual(next(item for item in history.json() if item["id"] == iid)["status"], "ready_to_finish")
+        detail = self.client.get(url, headers=self.headers)
+        self.assertEqual(detail.status_code, 200, detail.text)
+        self.assertEqual(detail.json()["status"], "ready_to_finish")
+        with patch.object(main, "deepseek_chat") as model:
+            self.assertEqual(self.client.post(f"{url}/session/open", headers=self.headers,
+                                             json={"request_id": "expired-history-reopen"}).status_code, 409)
+            self.assertEqual(self.client.post(f"{url}/answers", headers=self.headers,
+                                             json={"request_id": "expired-history-new-answer",
+                                                   "transcript": "这条到期后的回答不能写入。"}).status_code, 409)
+            model.assert_not_called()
+        with patch.object(main, "deepseek_chat", return_value=valid_report_json()):
+            finished = self.client.post(f"{url}/finish", headers=self.headers)
+        self.assertEqual(finished.status_code, 200, finished.text)
+        with self.Session() as db:
+            self.assertEqual(db.get(Appointment, appt).status, "finished")
+            answers = list(db.scalars(select(main.InterviewMessage).where(
+                main.InterviewMessage.interview_id == iid, main.InterviewMessage.kind == "answer")))
+            self.assertEqual(len(answers), 1)
+
     def test_model_returning_after_admission_expires_does_not_create_a_session(self):
         appt = self.admission()
 

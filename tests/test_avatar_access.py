@@ -8,11 +8,13 @@ import os
 import sqlite3
 import sys
 import tempfile
+import threading
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Dict
+from typing import Dict, Optional
 import unittest
 from unittest.mock import patch
 
@@ -25,6 +27,7 @@ except ImportError:
 ROOT = Path(__file__).resolve().parents[1]
 ROUTES = ROOT / 'integrations/LiveTalking/server/routes.py'
 RTC = ROUTES.with_name('rtc_manager.py')
+SESSION_MANAGER = ROUTES.with_name('session_manager.py')
 
 
 @unittest.skipUnless(web is not None and ROUTES.exists(), 'Requires aiohttp and patched LiveTalking checkout')
@@ -180,6 +183,8 @@ class RTCScopeTests(unittest.IsolatedAsyncioTestCase):
         self.build_continue.set()
         self.session_items = {}
         self.connection_block = False
+        self.peer_count = 0
+        self.player_count = 0
         self.stop_count = 0
 
         async def create(params):
@@ -189,8 +194,9 @@ class RTCScopeTests(unittest.IsolatedAsyncioTestCase):
             return 'rtc-1'
 
         class PC:
-            def __init__(self, **kw):
-                self.connectionState = 'new'
+            def __init__(pc, **kw):
+                self.peer_count += 1
+                pc.connectionState = 'new'
 
             def on(self, name, cb):
                 self.cb = cb
@@ -217,6 +223,8 @@ class RTCScopeTests(unittest.IsolatedAsyncioTestCase):
                 await self.cb()
 
         def player(avatar):
+            self.player_count += 1
+
             def stop():
                 self.stop_count += 1
             return SimpleNamespace(audio=None, video=None, stop=stop)
@@ -238,12 +246,26 @@ class RTCScopeTests(unittest.IsolatedAsyncioTestCase):
         self.namespace = namespace
         self.manager = namespace['RTCManager'](SimpleNamespace(stun='stun:127.0.0.1:9'))
 
-    def request(self, deadline):
+    def request(self, deadline, *, appointment_id=90):
         class Request(dict):
             async def json(self):
                 return {'sdp': 'fixture offer', 'type': 'offer'}
-        return Request(avatar_identity={'id': 1, 'role': 'student', 'appointment_id': 90,
-                                        'appointment_until': deadline})
+        identity = {'id': 1, 'role': 'student', 'appointment_id': appointment_id,
+                    'appointment_until': deadline} if appointment_id is not None else {
+                        'id': 1, 'role': 'admin', 'avatar_preview': True}
+        return Request(avatar_identity=identity)
+
+    def install_threaded_session_manager(self, builder):
+        # Run production capacity accounting/cancellation without importing avatar models.
+        tree = ast.parse(SESSION_MANAGER.read_text(encoding='utf-8'))
+        nodes = [node for node in tree.body if not isinstance(node, (ast.Import, ast.ImportFrom))]
+        scope = dict(asyncio=asyncio, uuid=uuid, Dict=Dict, Optional=Optional,
+                     BaseAvatar=SimpleNamespace, logger=logging.getLogger('test.avatar.capacity'))
+        exec(compile(ast.Module(body=nodes, type_ignores=[]), str(SESSION_MANAGER), 'exec'), scope)
+        manager = scope['session_manager']
+        manager.init_builder(builder)
+        self.namespace.update(session_manager=manager, MaxSessionError=scope['MaxSessionError'])
+        self.session_items = manager.sessions
 
     def assert_released(self):
         self.assertFalse(self.session_items)
@@ -272,6 +294,93 @@ class RTCScopeTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(web.HTTPGone):
             await self.manager.handle_offer(self.request(time.time() + .15))
         self.assertEqual(self.stop_count, 1)
+        self.assert_released()
+
+    async def test_offer_initialization_times_out_but_worker_stays_counted_until_exit(self):
+        loop = asyncio.get_running_loop()
+        release_worker = threading.Event()
+        worker_ended = threading.Event()
+
+        def builder(session_id, params):
+            loop.call_soon_threadsafe(self.build_entered.set)
+            if not release_worker.wait(8):
+                raise RuntimeError('Test did not unblock the avatar constructor')
+            worker_ended.set()
+            return SimpleNamespace()
+
+        self.install_threaded_session_manager(builder)
+        offer = asyncio.create_task(self.manager.handle_offer(self.request(time.time() + 1)))
+        try:
+            await asyncio.wait_for(self.build_entered.wait(), 2)
+            with self.assertRaises(web.HTTPGone):
+                # The test's guard timeout must not cancel the actual offer.
+                await asyncio.wait_for(asyncio.shield(offer), 3)
+            self.assertFalse(worker_ended.is_set())
+            self.assertFalse(self.manager.appointment_claims)
+            self.assertEqual(list(self.session_items.values()), [None])
+            self.assertEqual((self.peer_count, self.player_count), (0, 0))
+
+            different_offer = self.request(time.time() + 10, appointment_id=91)
+            busy_response = await self.manager.handle_offer(different_offer)
+            self.assertEqual(json.loads(busy_response.text)['code'], -1)
+            self.assertEqual(list(self.session_items.values()), [None])
+            self.assertFalse(self.manager.appointment_claims)
+        finally:
+            release_worker.set()
+            await asyncio.gather(offer, return_exceptions=True)
+
+        async with asyncio.timeout(3):
+            while self.session_items:
+                await asyncio.sleep(.01)
+        self.assertTrue(worker_ended.is_set())
+        self.assertEqual((self.peer_count, self.player_count), (0, 0))
+        self.assert_released()
+        other = await self.manager.handle_offer(self.request(time.time() + 10, appointment_id=91))
+        payload = json.loads(other.text)
+        self.assertEqual(other.status, 200)
+        self.assertEqual(self.session_items[payload['sessionid']].appointment_id, 91)
+        self.assertTrue(await self.manager.close_session(payload['sessionid']))
+        self.assert_released()
+
+    async def test_offer_initialization_checks_elapsed_deadline_before_creating_peer(self):
+        wall_time = 100.0
+        self.namespace['time'] = SimpleNamespace(time=lambda: wall_time)
+        create = self.namespace['session_manager'].create_session
+
+        async def late_create(params):
+            nonlocal wall_time
+            session_id = await create(params)
+            wall_time = 101.0  # Simulate completion exactly at the cutoff without a timer tick.
+            return session_id
+
+        self.namespace['session_manager'].create_session = late_create
+        with self.assertRaises(web.HTTPGone):
+            await self.manager.handle_offer(self.request(101.0))
+        self.assertEqual((self.peer_count, self.player_count), (0, 0))
+        self.assert_released()
+
+    async def test_offer_initialization_does_not_relabel_own_timeout_as_expiration(self):
+        async def failing_create(params):
+            raise TimeoutError('avatar builder timeout')
+
+        self.namespace['session_manager'].create_session = failing_create
+        with self.assertRaisesRegex(TimeoutError, 'avatar builder timeout'):
+            await self.manager.handle_offer(self.request(time.time() + 10))
+        self.assert_released()
+
+    async def test_offer_initialization_without_appointment_remains_unbounded(self):
+        self.build_continue.clear()
+        offer = asyncio.create_task(self.manager.handle_offer(self.request(None, appointment_id=None)))
+        try:
+            await asyncio.wait_for(self.build_entered.wait(), 2)
+            self.assertFalse(offer.done())
+            self.assertFalse(self.manager.appointment_claims)
+        finally:
+            self.build_continue.set()
+            response = await asyncio.wait_for(offer, 2)
+        self.assertEqual(response.status, 200)
+        self.assertIsNone(self.session_items['rtc-1'].appointment_id)
+        self.assertTrue(await self.manager.close_session('rtc-1'))
         self.assert_released()
 
     async def test_explicit_close_releases_scope_and_allows_reconnect_before_deadline(self):

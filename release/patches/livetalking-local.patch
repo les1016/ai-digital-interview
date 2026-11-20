@@ -726,7 +726,7 @@ index af92091..0b1c11a 100644
      app.router.add_get("/api/admin/sessions", admin_sessions)
      app.router.add_get('/sse', sse_handler)
 diff --git a/server/rtc_manager.py b/server/rtc_manager.py
-index d3e50a9..96353cf 100644
+index d3e50a9..115dd83 100644
 --- a/server/rtc_manager.py
 +++ b/server/rtc_manager.py
 @@ -2,12 +2,10 @@
@@ -757,7 +757,7 @@ index d3e50a9..96353cf 100644
  from server.session_manager import session_manager
  from server.session_manager import MaxSessionError
  
-@@ -38,66 +31,153 @@ class RTCManager:
+@@ -38,66 +31,172 @@ class RTCManager:
          """
          self.opt = opt
          self.pcs: set = set()
@@ -893,7 +893,26 @@ index d3e50a9..96353cf 100644
 -            content_type="application/json",
 -            text=json.dumps({
 +        try:
-+            sessionid = await session_manager.create_session(params)
++            if deadline is None:
++                sessionid = await session_manager.create_session(params)
++            else:
++                remaining = deadline - time.time()
++                if remaining <= 0:
++                    raise web.HTTPGone(text="The interview window has ended")
++                initialization_timeout = asyncio.timeout(remaining)
++                try:
++                    # Cancel the wait, not the constructor: SessionManager keeps
++                    # the running worker counted until it actually exits.
++                    async with initialization_timeout:
++                        sessionid = await session_manager.create_session(params)
++                except TimeoutError:
++                    if initialization_timeout.expired():
++                        raise web.HTTPGone(text="The interview window has ended") from None
++                    raise
++                # If the builder wins the scheduling race at the cutoff, discard
++                # the session without creating a peer connection or player.
++                if time.time() >= deadline:
++                    raise web.HTTPGone(text="The interview window has ended")
 +            avatar_session = session_manager.get_session(sessionid)
 +            avatar_session.interview_owner_id = identity["id"]
 +            avatar_session.appointment_id = appointment_id
@@ -959,7 +978,7 @@ index d3e50a9..96353cf 100644
  
      async def handle_rtcpush(self, push_url, sessionid: str):
          """RTCPush 模式：主动推流"""
-@@ -132,6 +212,9 @@ class RTCManager:
+@@ -132,6 +231,9 @@ class RTCManager:
  
      async def shutdown(self):
          """关闭所有 PeerConnection"""

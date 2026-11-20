@@ -140,6 +140,10 @@
     "target": "tests/appointment_ui.test.mjs"
   },
   {
+    "source": "tests/appointment_room.browser.cjs",
+    "target": "tests/appointment_room.browser.cjs"
+  },
+  {
     "source": "apps/web/src/AuthDialog.jsx",
     "target": "apps/web/src/AuthDialog.jsx"
   },
@@ -448,6 +452,10 @@
     "target": "release/privacy-check.yml"
   },
   {
+    "source": "release/appointment-tests.yml",
+    "target": "release/appointment-tests.yml"
+  },
+  {
     "source": "scripts/export-public.ps1",
     "target": "scripts/export-public.ps1"
   },
@@ -466,6 +474,10 @@
   {
     "source": "release/privacy-check.yml",
     "target": ".github/workflows/privacy-check.yml"
+  },
+  {
+    "source": "release/appointment-tests.yml",
+    "target": ".github/workflows/appointment-tests.yml"
   },
   {
     "source": "scripts/process-arguments.ps1",

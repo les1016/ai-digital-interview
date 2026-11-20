@@ -896,12 +896,16 @@ export default function InterviewRoom({ resume, existingInterview = null, mediaS
     let created = null
     try {
       if (existingInterview?.id) {
-        const sessionState = await api(`/interviews/${existingInterview.id}/session/open`, {
+        // A report-only history entry can still be stored as active after its
+        // appointment ends. Reading its saved answers must not reopen the session.
+        const sessionState = reportOnly ? null : await api(`/interviews/${existingInterview.id}/session/open`, {
           method: 'POST',
           body: JSON.stringify({ request_id: createRequestId() }),
         })
-        interruptionSessionIdRef.current = sessionState.interruption_session_id
-        interruptionSessionTokenRef.current = sessionState.interruption_session_token
+        if (sessionState) {
+          interruptionSessionIdRef.current = sessionState.interruption_session_id
+          interruptionSessionTokenRef.current = sessionState.interruption_session_token
+        }
         const record = await api(`/interviews/${existingInterview.id}`)
         if (operationGenerationRef.current !== operationGeneration) return
         if (record.report || record.status === 'completed') {
@@ -914,12 +918,15 @@ export default function InterviewRoom({ resume, existingInterview = null, mediaS
           }
           throw new Error('这场面试已经完成，但报告暂不可用')
         }
+        if (reportOnly && record.status !== 'ready_to_finish') {
+          throw new Error('这场面试当前无法生成成长报告，请返回工作台刷新后重试。')
+        }
         if (!['active', 'paused', 'ready_to_finish', 'pause_expired'].includes(record.status)) {
           throw new Error('这场面试已经无法继续')
         }
         const lastQuestion = [...(record.messages || [])].reverse().find(item => item.speaker === 'interviewer' && (item.kind || 'question') === 'question')
-        if (!lastQuestion) throw new Error('未找到可继续的面试问题')
-        created = { ...record, question: sessionState.question_override || lastQuestion.content }
+        if (!lastQuestion && !reportOnly) throw new Error('未找到可继续的面试问题')
+        created = { ...record, question: sessionState?.question_override || lastQuestion?.content || '' }
         setTargetRole(record.job_description || record.target_role || '')
         setMessages(record.messages || [])
         setQuestionCount((record.messages || []).filter(item => item.speaker === 'interviewer' && (item.kind || 'question') === 'question').length)
@@ -1663,13 +1670,16 @@ export default function InterviewRoom({ resume, existingInterview = null, mediaS
     exitingRef.current = true
     pauseActiveRef.current = false
     clearInterval(pauseTimerRef.current)
-    cancelInteractiveWork()
     setError('')
     setPhase('exiting')
     clearInterval(timerRef.current)
     timerRef.current = null
     try {
-      await stopRecordingAndUpload(interview.id)
+      // Queue the recorder's final event first, but never hold devices open
+      // while the queued chunks are uploading or waiting for a retry.
+      const recordingTask = stopRecordingAndUpload(interview.id)
+      releaseRealtimeResources()
+      await recordingTask
       if (!afterDeadline && !timeIsOver() && interruptionSessionIdRef.current && interruptionSessionTokenRef.current && !['paused', 'can-finish', 'reporting', 'report-failed', 'pause-expired', 'invalid-ended'].includes(phase)) {
         try {
           await api(`/interviews/${interview.id}/interruptions`, {
@@ -1685,10 +1695,8 @@ export default function InterviewRoom({ resume, existingInterview = null, mediaS
           // 断网退出不能阻止用户离开；服务恢复后仍可从已保存断点继续。
         }
       }
-      releaseRealtimeResources()
       onExit()
     } catch (reason) {
-      releaseRealtimeResources()
       setError(`退出前保存录像失败：${reason.message}。请检查后再次点击“退出面试室”重试。`)
       setPhase('exit-save-failed')
     } finally {
@@ -1741,6 +1749,7 @@ export default function InterviewRoom({ resume, existingInterview = null, mediaS
         </div>
         {phase === 'setup' && reportOnly && <div className="setup-card">
           <p className="eyebrow">面试记录</p><h1>准备生成成长报告</h1><p>面试已结束。整理报告不会开启摄像头、麦克风或数字人。</p>
+          {error && <p className="form-error" role="alert">{error}</p>}
           <button className="primary wide" onClick={startInterview}><FileText />读取已保存的问答</button>
         </div>}
         {phase === 'setup' && !reportOnly && <div className="setup-card">
@@ -1750,6 +1759,7 @@ export default function InterviewRoom({ resume, existingInterview = null, mediaS
           <textarea className="job-target-input" rows={7} maxLength={12000} value={targetRole} onChange={event => setTargetRole(event.target.value)} placeholder={'例如：产品经理\n\n或直接粘贴岗位 JD：\n岗位职责：负责用户调研、需求分析……\n任职要求：熟悉数据分析，具备项目协作经验……（选填）'} />
           <div className="interview-policy"><ShieldCheck /><div><b>开始前请了解</b><span>回答时若长时间没有持续有效表达，系统会显示 5 秒倒计时并自动结束本轮；短促咳嗽或环境声不会延长等待。</span><span><strong className="pause-location">位置：进入面试后页面右上角</strong>临时有事请优先使用“有急事，暂停一次”，每场一次，最长保留 {policyPauseMinutes} 分钟。</span><span>请勿直接关闭网页或反复强制退出。{policyWindowHours} 小时内前 {policyWarningCount} 次只提醒，第 {policyThreshold} 次将冷却 {policyCooldownMinutes} 分钟；偶发断网或设备断开不计入。</span><span>点击开始后，面试官会先口头说明以上规则，再提出第一题。</span></div></div>
           {hasAppointmentTime && <p>签到后开始计时，倒计时包含准备与暂停时间。</p>}
+          {error && <p className="form-error" role="alert">{error}</p>}
           <button className="primary wide" disabled={!canStream || appointmentRemaining === 0} onClick={startInterview}><Sparkles />{existingInterview ? '继续这场面试' : '开始模拟面试'}</button>
         </div>}
         {phase !== 'setup' && !pauseDeadlineMs && !opening.busy && <div className="question-card">
@@ -1795,7 +1805,7 @@ export default function InterviewRoom({ resume, existingInterview = null, mediaS
           </> : <p>{correction.status === 'confirmed' ? '后续追问、摘要和报告将使用更正后的内容；原话留在记录中供核对。' : '本次更正已取消，你之前的说法保持不变。'}</p>}
         </section>}
         {transcript && <div className="latest-transcript"><small>刚才的回答</small><p>{transcript}</p></div>}
-        {error && <p className="form-error" role="alert">{error}</p>}
+        {error && phase !== 'setup' && <p className="form-error" role="alert">{error}</p>}
         {phase === 'listening' && silenceCountdown !== null && <div className="silence-countdown" role="alert"><Hourglass /><div><b>暂未检测到持续有效表达</b><span>将在 {silenceCountdown} 秒后自动结束本轮回答；继续完整表达即可取消。</span></div><strong>{silenceCountdown}</strong></div>}
         <div className="room-actions">
           {phase === 'listening' && <button className="stop-answer wide answer-button" onClick={finishSpeech}>
