@@ -50,12 +50,18 @@ jobs:
         run: |
           npx --yes pnpm@11.9.0 --dir apps/web install --frozen-lockfile
           npx --yes pnpm@11.9.0 --dir apps/web build
-      - name: Install Chromium for the local browser fixture
-        run: |
-          npm install --prefix "$RUNNER_TEMP/appointment-playwright" --no-audit --no-fund playwright@1.62.1
-          "$RUNNER_TEMP/appointment-playwright/node_modules/.bin/playwright" install --with-deps chromium
+      - name: Install Playwright for the runner's preinstalled Chrome
+        timeout-minutes: 2
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+        run: npm install --prefix "$RUNNER_TEMP/appointment-playwright" --no-audit --no-fund playwright@1.62.1
       - name: Test expired report entry and slow recorder upload with simulated devices
-        run: NODE_PATH="$RUNNER_TEMP/appointment-playwright/node_modules" node --test tests/appointment_room.browser.cjs
+        run: |
+          CHROMIUM_EXECUTABLE="$(command -v google-chrome)"
+          test -x "$CHROMIUM_EXECUTABLE"
+          export CHROMIUM_EXECUTABLE
+          google-chrome --version
+          NODE_PATH="$RUNNER_TEMP/appointment-playwright/node_modules" node --test tests/appointment_room.browser.cjs
 
   appointment-rtc:
     runs-on: ubuntu-latest
